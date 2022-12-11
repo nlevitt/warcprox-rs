@@ -1,0 +1,50 @@
+[package]
+name = "warcprox-rs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+hudsucker = { path = "../hudsucker", version = "0.18" }
+tracing = { version = "0.1.21", features = ["log"] }
+tokio = { version = "1.6.1", features = ["full"] }
+rustls-pemfile = "1.0.0"
+tracing-subscriber = "0.3.0"
+rcgen = { version = "0.10.0", features = ["x509-parser"] }
+
+#[dependencies]
+#async-compression = { version = "0.3.7", features = ["tokio", "brotli", "gzip", "zlib", "zstd"], optional = true }
+#async-trait = "0.1.7"
+#bstr = "1.0.0"
+#bytes = "1.0.0"
+#futures = "0.3.11"
+#http = "0.2.0"
+#hyper = { version = "0.14.7", features = ["client", "http1", "server", "stream", "tcp"] }
+#hyper-rustls = { version = "0.23.0", default-features = false, features = ["http1", "logging", "tls12", "webpki-tokio"], optional = true }
+#hyper-tls = { version = "0.5.0", optional = true }
+#hyper-tungstenite = "0.9.0"
+#moka = { version = "0.9.0", features = ["future"], optional = true }
+#openssl = { version = "0.10.25", optional = true }
+#rand = { version = "0.8.0", optional = true }
+#rcgen = { version = "0.10.0", features = ["x509-parser"], optional = true }
+#thiserror = "1.0.23"
+#time = { version = "0.3.1", optional = true }
+#tokio = { version = "1.6.1", features = ["rt"] }
+#tokio-rustls = "0.23.0"
+#tokio-tungstenite = { version = "0.18.0" }
+#tokio-util = { version = "0.7.0", features = ["io"], optional = true }
+#tracing = { version = "0.1.21", features = ["log"] }
+#
+#[dev-dependencies]
+#async-http-proxy = { version = "1.2.5", features = ["runtime-tokio"] }
+#criterion = { version = "0.4.0", features = ["async_tokio"] }
+#reqwest = "0.11.10"
+#rustls-native-certs = "0.6.2"
+#rustls-pemfile = "1.0.0"
+#tls-listener = { version = "0.5.1", features = ["rustls", "hyper-h1", "hyper-h2"] }
+#tokio = { version = "1.6.1", features = ["full"] }
+#tokio-native-tls = "0.3.0"
+#tracing-subscriber = "0.3.0"
+#x509-parser = "0.14.0"
+
