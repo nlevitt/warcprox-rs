@@ -5,7 +5,7 @@ use hudsucker::{
     tokio_tungstenite::tungstenite::Message,
     *,
 };
-use rcgen::generate_simple_self_signed;
+use rcgen::{BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, generate_simple_self_signed, IsCa};
 use rustls_pemfile as pemfile;
 use std::net::SocketAddr;
 use tracing::*;
@@ -44,28 +44,40 @@ impl WebSocketHandler for LogHandler {
     }
 }
 
+fn build_ca() -> RcgenAuthority {
+    let mut ca_cert_params = CertificateParams::default();
+    ca_cert_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    ca_cert_params.distinguished_name = DistinguishedName::new();
+    ca_cert_params.distinguished_name.push(
+        DnType::CommonName,
+        DnValue::PrintableString("warcprox-rs CA".to_string()),
+    );
+    let ca_cert = Certificate::from_params(ca_cert_params).unwrap();
+    info!("created CA cert:\n{}", ca_cert.serialize_pem().unwrap());
+
+    let private_key = rustls::PrivateKey(ca_cert.get_key_pair().serialize_der());
+    let ca_cert = rustls::Certificate(ca_cert.serialize_der().unwrap());
+
+    let ca = RcgenAuthority::new(private_key, ca_cert, 1_000)
+        .expect("Failed to create Certificate Authority");
+    ca
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let cert = generate_simple_self_signed(["warcprox-rs CA".to_string()]).unwrap();
-    println!("{}", cert.serialize_pem().unwrap());
-
-    let private_key = rustls::PrivateKey(cert.get_key_pair().serialize_der());
-    let ca_cert = rustls::Certificate(cert.serialize_der().unwrap());
-
-    let ca = RcgenAuthority::new(private_key, ca_cert, 1_000)
-        .expect("Failed to create Certificate Authority");
-
+    let ca = build_ca();
+    let addr = SocketAddr::from(([127, 0, 0, 1], 8000));
     let proxy = Proxy::builder()
-        .with_addr(SocketAddr::from(([127, 0, 0, 1], 3000)))
+        .with_addr(addr)
         .with_rustls_client()
         .with_ca(ca)
         .with_http_handler(LogHandler)
         .with_websocket_handler(LogHandler)
         .build();
 
-    println!("starting proxy at 127.0.0.1:3000");
+    info!("proxy listening at {}", addr);
 
     if let Err(e) = proxy.start(shutdown_signal()).await {
         error!("{}", e);
