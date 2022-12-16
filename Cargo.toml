@@ -12,6 +12,9 @@ tokio = { version = "1.6.1", features = ["full"] }
 rustls-pemfile = "1.0.0"
 tracing-subscriber = "0.3.0"
 rcgen = { version = "0.10.0", features = ["x509-parser"] }
+hyper = { version = "0.14.23", features = ["stream"] }
+futures-util = "0.3.25"
+futures-core = "0.3.25"
 
 #[dependencies]
 #async-compression = { version = "0.3.7", features = ["tokio", "brotli", "gzip", "zlib", "zstd"], optional = true }

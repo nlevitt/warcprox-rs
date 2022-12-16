@@ -1,20 +1,38 @@
 use hudsucker::{
     async_trait::async_trait,
     certificate_authority::RcgenAuthority,
+    hyper::body::HttpBody,
     hyper::{Body, Request, Response},
+    rustls,
     tokio_tungstenite::tungstenite::Message,
-    *,
+    HttpContext, HttpHandler, Proxy, RequestOrResponse, WebSocketContext, WebSocketHandler,
 };
-use rcgen::{BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, generate_simple_self_signed, IsCa};
-use rustls_pemfile as pemfile;
+use rcgen::{
+    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
+};
 use std::net::SocketAddr;
-use tracing::*;
+use tokio::io::AsyncWriteExt;
+use tracing::*; // for mpsc::Receiver
 
 async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
         .expect("Failed to install CTRL+C signal handler");
 }
+
+// async fn process_body<'a>(mut body: Body) -> Result<Body, Error> {
+//     while let Some(buf) = body.data().await {
+//         println!("{:?}", buf);
+//     }
+//     Ok(body)
+// }
+
+// fn process_response(mut res: Response<Body>) -> Result<Response<Body>, Error> {
+//     let (mut parts, body) = res.into_parts();
+//     // let body = process_body(body);
+//     body.poll_next()
+//     Ok(Response::from_parts(parts, body))
+// }
 
 #[derive(Clone)]
 struct LogHandler;
@@ -30,8 +48,28 @@ impl HttpHandler for LogHandler {
         req.into()
     }
 
-    async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
+    async fn handle_response(
+        &mut self,
+        _ctx: &HttpContext,
+        mut res: Response<Body>,
+    ) -> Response<Body> {
         println!("{:?}", res);
+        // let res = process_response(res).unwrap();
+        // let (mut parts, body): (Parts, Body) = res.into_parts();
+
+        while let Some(next) = res.data().await {
+            let chunk = next.unwrap();
+            tokio::io::stdout().write_all(&chunk).await.unwrap();
+        }
+
+        // let body = body.then(|buf| async move { x + 3 });
+        // let s: dyn Stream = body.into();
+
+        // let body = body.then(|buf| {
+        //     println!(buf);
+        //     Ok(buf)
+        // });
+        // Response::from_parts(parts, body.into())
         res
     }
 }
@@ -80,6 +118,6 @@ async fn main() {
     info!("proxy listening at {}", addr);
 
     if let Err(e) = proxy.start(shutdown_signal()).await {
-        error!("{}", e);
+        error!("proxy failed to start: {}", e);
     }
 }
