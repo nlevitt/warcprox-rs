@@ -15,6 +15,7 @@ rcgen = { version = "0.10.0", features = ["x509-parser"] }
 hyper = { version = "0.14.23", features = ["stream"] }
 futures-util = "0.3.25"
 futures-core = "0.3.25"
+http-body = "0.4.5"
 
 #[dependencies]
 #async-compression = { version = "0.3.7", features = ["tokio", "brotli", "gzip", "zlib", "zstd"], optional = true }

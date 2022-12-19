@@ -1,3 +1,6 @@
+use futures_util::future::Map;
+use futures_util::FutureExt;
+use http_body::Data;
 use hudsucker::{
     async_trait::async_trait,
     certificate_authority::RcgenAuthority,
@@ -7,10 +10,13 @@ use hudsucker::{
     tokio_tungstenite::tungstenite::Message,
     HttpContext, HttpHandler, Proxy, RequestOrResponse, WebSocketContext, WebSocketHandler,
 };
+use hyper::body::Bytes;
+use hyper::Error;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
 };
 use std::net::SocketAddr;
+use futures_core::Stream;
 use tokio::io::AsyncWriteExt;
 use tracing::*; // for mpsc::Receiver
 
@@ -22,7 +28,7 @@ async fn shutdown_signal() {
 
 // async fn process_body<'a>(mut body: Body) -> Result<Body, Error> {
 //     while let Some(buf) = body.data().await {
-//         println!("{:?}", buf);
+//         info!("{:?}", buf);
 //     }
 //     Ok(body)
 // }
@@ -44,40 +50,51 @@ impl HttpHandler for LogHandler {
         _ctx: &HttpContext,
         req: Request<Body>,
     ) -> RequestOrResponse {
-        println!("{:?}", req);
+        info!("{:?}", req);
         req.into()
     }
 
-    async fn handle_response(
-        &mut self,
-        _ctx: &HttpContext,
-        mut res: Response<Body>,
-    ) -> Response<Body> {
-        println!("{:?}", res);
+    async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
+        info!("{:?}", res);
         // let res = process_response(res).unwrap();
-        // let (mut parts, body): (Parts, Body) = res.into_parts();
+        let (parts, mut body) = res.into_parts();
 
-        while let Some(next) = res.data().await {
-            let chunk = next.unwrap();
-            tokio::io::stdout().write_all(&chunk).await.unwrap();
-        }
+        // while let Some(next) = res.data().await {
+        //     let chunk = next.unwrap();
+        //     tokio::io::stdout().write_all(&chunk).await.unwrap();
+        // }
+
+        let data: Map<
+            Data<Body>,
+            fn(Option<Result<Bytes, Error>>) -> Option<Result<Bytes, Error>>,
+        > = body.data().map(|x| {
+            info!("{:?}", x.unwrap().unwrap());
+            x
+        });
+        let body = Body::wrap_stream(data);
+        // let body = Body::from(data);
+        // Body::from();
+        // data.then(|x| {
+        //     x.unwrap().unwrap();
+        // });
 
         // let body = body.then(|buf| async move { x + 3 });
         // let s: dyn Stream = body.into();
 
         // let body = body.then(|buf| {
-        //     println!(buf);
+        //     info!(buf);
         //     Ok(buf)
         // });
         // Response::from_parts(parts, body.into())
-        res
+        Response::from_parts(parts, Body::from("hello"))
+        // Response::new(Body::from('hello'))
     }
 }
 
 #[async_trait]
 impl WebSocketHandler for LogHandler {
     async fn handle_message(&mut self, _ctx: &WebSocketContext, msg: Message) -> Option<Message> {
-        println!("{:?}", msg);
+        info!("{:?}", msg);
         Some(msg)
     }
 }
