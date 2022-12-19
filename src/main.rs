@@ -1,5 +1,6 @@
-use futures_util::future::Map;
-use futures_util::FutureExt;
+use futures::FutureExt;
+use futures::future::Map;
+use futures::{Stream, StreamExt};
 use http_body::Data;
 use hudsucker::{
     async_trait::async_trait,
@@ -16,7 +17,8 @@ use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
 };
 use std::net::SocketAddr;
-use futures_core::Stream;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tokio::io::AsyncWriteExt;
 use tracing::*; // for mpsc::Receiver
 
@@ -39,6 +41,23 @@ async fn shutdown_signal() {
 //     body.poll_next()
 //     Ok(Response::from_parts(parts, body))
 // }
+
+struct IoStream<T: Stream<Item = Result<Bytes, hyper::Error>> + Unpin>(T);
+
+impl<T: Stream<Item = Result<Bytes, hyper::Error>> + Unpin> Stream for IoStream<T> {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        match futures::ready!(Pin::new(&mut self.0).poll_next(cx)) {
+            Some(Ok(chunk)) => Poll::Ready(Some(Ok(chunk))),
+            Some(Err(err)) => Poll::Ready(Some(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                err,
+            )))),
+            None => Poll::Ready(None),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct LogHandler;
@@ -64,14 +83,19 @@ impl HttpHandler for LogHandler {
         //     tokio::io::stdout().write_all(&chunk).await.unwrap();
         // }
 
-        let data: Map<
-            Data<Body>,
-            fn(Option<Result<Bytes, Error>>) -> Option<Result<Bytes, Error>>,
-        > = body.data().map(|x| {
-            info!("{:?}", x.unwrap().unwrap());
-            x
-        });
-        let body = Body::wrap_stream(data);
+        let body = Body::wrap_stream(IoStream(body).map(|buf| {
+            info!("{:?}", buf);
+            buf
+        }));
+        // Self::Body(body) => Box::new(StreamReader::new(IoStream(body))),
+        // let data: Map<
+        //     Data<Body>,
+        //     fn(Option<Result<Bytes, Error>>) -> Option<Result<Bytes, Error>>,
+        // > = body.data().map(|buf| {
+        //     info!("{:?}", buf.unwrap().unwrap());
+        //     buf
+        // });
+        // let body = Body::wrap_stream(data);
         // let body = Body::from(data);
         // Body::from();
         // data.then(|x| {
@@ -86,7 +110,7 @@ impl HttpHandler for LogHandler {
         //     Ok(buf)
         // });
         // Response::from_parts(parts, body.into())
-        Response::from_parts(parts, Body::from("hello"))
+        Response::from_parts(parts, body)
         // Response::new(Body::from('hello'))
     }
 }
