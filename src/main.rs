@@ -1,43 +1,28 @@
-use futures::{Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
 use hudsucker::{
     async_trait::async_trait,
     certificate_authority::RcgenAuthority,
     hyper::{Body, Request, Response},
     rustls,
     tokio_tungstenite::tungstenite::Message,
-    HttpContext, HttpHandler, Proxy, RequestOrResponse, WebSocketContext, WebSocketHandler,
+    HttpContext, HttpHandler, Proxy, RequestOrResponse, WebSocketContext,
 };
-use hyper::body::Bytes;
+use hyper::body::{Bytes, HttpBody};
 use hyper::Error;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
 };
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use sha2::digest::FixedOutput;
 use tracing::*; // for mpsc::Receiver
 
 async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
         .expect("Failed to install CTRL+C signal handler");
-}
-
-struct IoStream<T: Stream<Item = Result<Bytes, Error>> + Unpin>(T);
-
-impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for IoStream<T> {
-    type Item = Result<Bytes, std::io::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        match futures::ready!(Pin::new(&mut self.0).poll_next(cx)) {
-            Some(Ok(chunk)) => Poll::Ready(Some(Ok(chunk))),
-            Some(Err(err)) => Poll::Ready(Some(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                err,
-            )))),
-            None => Poll::Ready(None),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -58,19 +43,13 @@ impl HttpHandler for WarcProxyHandler {
         info!("{:?}", res);
         let (parts, body) = res.into_parts();
 
-        let body = Body::wrap_stream(IoStream(body).map(|buf| {
+        let mut sha256 = Sha256::new();
+        let body = body.map_data(|buf| {
             info!("{:?}", buf);
+            sha256.update(&buf);
             buf
-        }));
+        }).into_inner();
         Response::from_parts(parts, body)
-    }
-}
-
-#[async_trait]
-impl WebSocketHandler for WarcProxyHandler {
-    async fn handle_message(&mut self, _ctx: &WebSocketContext, msg: Message) -> Option<Message> {
-        info!("{:?}", msg);
-        Some(msg)
     }
 }
 
@@ -104,7 +83,6 @@ async fn main() {
         .with_rustls_client()
         .with_ca(ca)
         .with_http_handler(WarcProxyHandler)
-        .with_websocket_handler(WarcProxyHandler)
         .build();
 
     info!("proxy listening at {}", addr);
