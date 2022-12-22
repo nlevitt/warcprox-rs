@@ -12,19 +12,37 @@ use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
 };
 use sha2::{digest::FixedOutput, Digest, Sha256};
+use std::borrow::BorrowMut;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tracing::*; // for mpsc::Receiver
 
-struct IoStream<T: Stream<Item = Result<Bytes, Error>> + Unpin>(T);
+#[derive(Debug)]
+struct ResponseStream<T: Stream<Item = Result<Bytes, Error>> + Unpin> {
+    inner_stream: T,
+    sha256: Sha256,
+}
 
-impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for IoStream<T> {
+impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> ResponseStream<T> {
+    fn wrap(inner_stream: T) -> ResponseStream<T> {
+        let sha256 = Sha256::new();
+        ResponseStream {
+            inner_stream,
+            sha256,
+        }
+    }
+}
+
+impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for ResponseStream<T> {
     type Item = Result<Bytes, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        match futures::ready!(Pin::new(&mut self.0).poll_next(cx)) {
-            Some(Ok(chunk)) => Poll::Ready(Some(Ok(chunk))),
+        match futures::ready!(Pin::new(&mut self.inner_stream).poll_next(cx)) {
+            Some(Ok(chunk)) => {
+                self.sha256.update(&chunk);
+                Poll::Ready(Some(Ok(chunk)))
+            },
             Some(Err(err)) => Poll::Ready(Some(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 err,
@@ -59,7 +77,7 @@ impl HttpHandler for WarcProxyHandler {
         let (parts, body) = res.into_parts();
 
         let mut sha256 = Sha256::new();
-        let body = Body::wrap_stream(IoStream(body).map_ok(move |buf| {
+        let body = Body::wrap_stream(ResponseStream::wrap(body).map_ok(move |buf| {
             info!("{:?}", buf);
             sha256.update(&buf);
             buf
