@@ -1,4 +1,4 @@
-use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use hudsucker::{
     async_trait::async_trait,
     certificate_authority::RcgenAuthority,
@@ -7,17 +7,32 @@ use hudsucker::{
     tokio_tungstenite::tungstenite::Message,
     HttpContext, HttpHandler, Proxy, RequestOrResponse, WebSocketContext,
 };
-use hyper::body::{Bytes, HttpBody};
-use hyper::Error;
+use hyper::{body::Bytes, Error};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
 };
-use sha2::{Digest, Sha256};
+use sha2::{digest::FixedOutput, Digest, Sha256};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use sha2::digest::FixedOutput;
 use tracing::*; // for mpsc::Receiver
+
+struct IoStream<T: Stream<Item = Result<Bytes, Error>> + Unpin>(T);
+
+impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for IoStream<T> {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        match futures::ready!(Pin::new(&mut self.0).poll_next(cx)) {
+            Some(Ok(chunk)) => Poll::Ready(Some(Ok(chunk))),
+            Some(Err(err)) => Poll::Ready(Some(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                err,
+            )))),
+            None => Poll::Ready(None),
+        }
+    }
+}
 
 async fn shutdown_signal() {
     tokio::signal::ctrl_c()
@@ -44,11 +59,12 @@ impl HttpHandler for WarcProxyHandler {
         let (parts, body) = res.into_parts();
 
         let mut sha256 = Sha256::new();
-        let body = body.map_data(|buf| {
+        let body = Body::wrap_stream(IoStream(body).map_ok(move |buf| {
             info!("{:?}", buf);
             sha256.update(&buf);
             buf
-        }).into_inner();
+        }));
+
         Response::from_parts(parts, body)
     }
 }
