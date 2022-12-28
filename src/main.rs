@@ -1,35 +1,42 @@
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::Stream;
 use hudsucker::{
-    async_trait::async_trait,
-    certificate_authority::RcgenAuthority,
-    hyper::{Body, Request, Response},
-    rustls,
-    tokio_tungstenite::tungstenite::Message,
-    HttpContext, HttpHandler, Proxy, RequestOrResponse, WebSocketContext,
+    async_trait::async_trait, certificate_authority::RcgenAuthority, hyper::Response, rustls,
+    HttpContext, HttpHandler, Proxy, RequestOrResponse,
 };
-use hyper::{body::Bytes, Error};
+use hyper::{body::Bytes, Body, Error, Request};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
 };
-use sha2::{digest::FixedOutput, Digest, Sha256};
-use std::borrow::BorrowMut;
+use sha2::digest::Output;
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tracing::*; // for mpsc::Receiver
+use tracing::{error, info};
+
+#[derive(Debug)]
+enum Sha256State {
+    InProgress(Sha256),
+    Finalized(Output<Sha256>),
+}
+
+impl Default for Sha256State {
+    fn default() -> Self {
+        Sha256State::InProgress(Sha256::new())
+    }
+}
 
 #[derive(Debug)]
 struct ResponseStream<T: Stream<Item = Result<Bytes, Error>> + Unpin> {
     inner_stream: T,
-    sha256: Sha256,
+    sha256state: Sha256State,
 }
 
 impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> ResponseStream<T> {
     fn wrap(inner_stream: T) -> ResponseStream<T> {
-        let sha256 = Sha256::new();
         ResponseStream {
             inner_stream,
-            sha256,
+            sha256state: Sha256State::InProgress(Sha256::new()),
         }
     }
 }
@@ -38,16 +45,27 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for ResponseStream<T
     type Item = Result<Bytes, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        // println!("{}", std::backtrace::Backtrace::capture());
         match futures::ready!(Pin::new(&mut self.inner_stream).poll_next(cx)) {
             Some(Ok(chunk)) => {
-                self.sha256.update(&chunk);
+                info!("{:?}", chunk);
+                if let Sha256State::InProgress(sha256) = &mut self.sha256state {
+                    sha256.update(&chunk);
+                }
                 Poll::Ready(Some(Ok(chunk)))
-            },
+            }
             Some(Err(err)) => Poll::Ready(Some(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 err,
             )))),
-            None => Poll::Ready(None),
+            None => {
+                // https://rust-unofficial.github.io/patterns/idioms/mem-replace.html
+                if let Sha256State::InProgress(sha256) = std::mem::take(&mut self.sha256state) {
+                    self.sha256state = Sha256State::Finalized(sha256.finalize());
+                }
+                info!("{:?}", self.sha256state);
+                Poll::Ready(None)
+            }
         }
     }
 }
@@ -73,17 +91,13 @@ impl HttpHandler for WarcProxyHandler {
     }
 
     async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
-        info!("{:?}", res);
+        info!("handle_response before {:?}", res);
         let (parts, body) = res.into_parts();
-
-        let mut sha256 = Sha256::new();
-        let body = Body::wrap_stream(ResponseStream::wrap(body).map_ok(move |buf| {
-            info!("{:?}", buf);
-            sha256.update(&buf);
-            buf
-        }));
-
-        Response::from_parts(parts, body)
+        let body = Body::wrap_stream(ResponseStream::wrap(body));
+        let (sender, body) = Body::channel();
+        let rv = Response::from_parts(parts, body);
+        info!("handle_response after {:?}", rv);
+        rv
     }
 }
 

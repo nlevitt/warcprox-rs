@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-hudsucker = { path = "../hudsucker", version = "0.18" }
+hudsucker = { path = "../hudsucker", version = "0.19" }
 tracing = { version = "0.1.21", features = ["log"] }
 tokio = { version = "1.23.0", features = ["full"] }
 tracing-subscriber = "0.3.0"
