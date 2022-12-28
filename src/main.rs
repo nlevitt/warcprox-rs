@@ -1,9 +1,10 @@
 use futures::Stream;
 use hudsucker::{
-    async_trait::async_trait, certificate_authority::RcgenAuthority, hyper::Response, rustls,
-    HttpContext, HttpHandler, Proxy, RequestOrResponse,
+    async_trait::async_trait,
+    certificate_authority::RcgenAuthority,
+    hyper::{body::Bytes, Body, Error, Request, Response},
+    rustls, HttpContext, HttpHandler, Proxy, RequestOrResponse,
 };
-use hyper::{body::Bytes, Body, Error, Request};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
 };
@@ -45,7 +46,6 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for ResponseStream<T
     type Item = Result<Bytes, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        // println!("{}", std::backtrace::Backtrace::capture());
         match futures::ready!(Pin::new(&mut self.inner_stream).poll_next(cx)) {
             Some(Ok(chunk)) => {
                 info!("{:?}", chunk);
@@ -94,7 +94,6 @@ impl HttpHandler for WarcProxyHandler {
         info!("handle_response before {:?}", res);
         let (parts, body) = res.into_parts();
         let body = Body::wrap_stream(ResponseStream::wrap(body));
-        let (sender, body) = Body::channel();
         let rv = Response::from_parts(parts, body);
         info!("handle_response after {:?}", rv);
         rv
@@ -122,6 +121,7 @@ fn build_ca() -> RcgenAuthority {
 
 #[tokio::main]
 async fn main() {
+    // console_subscriber::init();
     tracing_subscriber::fmt::init();
 
     let ca = build_ca();
