@@ -1,21 +1,18 @@
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{Stream, TryStreamExt};
 use hudsucker::{
     async_trait::async_trait,
     certificate_authority::RcgenAuthority,
-    hyper::{Body, Request, Response},
-    rustls,
-    tokio_tungstenite::tungstenite::Message,
-    HttpContext, HttpHandler, Proxy, RequestOrResponse, WebSocketContext,
+    hyper::{body::Bytes, Body, Error, Request, Response},
+    rustls, HttpContext, HttpHandler, Proxy, RequestOrResponse,
 };
-use hyper::{body::Bytes, Error};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
 };
-use sha2::{digest::FixedOutput, Digest, Sha256};
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tracing::*; // for mpsc::Receiver
+use tracing::{error, info};
 
 struct IoStream<T: Stream<Item = Result<Bytes, Error>> + Unpin>(T);
 
@@ -63,7 +60,7 @@ impl HttpHandler for WarcProxyHandler {
             info!("{:?}", buf);
             sha256.update(&buf);
             buf
-        }));
+        })); // How to call sha256.finalize() after stream finishes?
 
         Response::from_parts(parts, body)
     }
