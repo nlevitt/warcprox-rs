@@ -13,6 +13,7 @@ tracing-subscriber = "0.3.0"
 rcgen = { version = "0.10.0", features = ["x509-parser"] }
 futures = "0.3.25"
 sha2 = "0.10.6"
+base16 = "0.2.1"
 
 [patch.crates-io]
 hudsucker = { path = "../hudsucker" }

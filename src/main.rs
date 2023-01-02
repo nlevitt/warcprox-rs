@@ -28,21 +28,21 @@ impl Default for Sha256State {
 }
 
 #[derive(Debug)]
-struct ResponseStream<T: Stream<Item = Result<Bytes, Error>> + Unpin> {
+struct BodyStream<T: Stream<Item = Result<Bytes, Error>> + Unpin> {
     inner_stream: T,
     sha256state: Sha256State,
 }
 
-impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> ResponseStream<T> {
-    fn wrap(inner_stream: T) -> ResponseStream<T> {
-        ResponseStream {
+impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> BodyStream<T> {
+    fn wrap(inner_stream: T) -> BodyStream<T> {
+        BodyStream {
             inner_stream,
             sha256state: Sha256State::InProgress(Sha256::new()),
         }
     }
 }
 
-impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for ResponseStream<T> {
+impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for BodyStream<T> {
     type Item = Result<Bytes, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
@@ -58,14 +58,18 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for ResponseStream<T
                 std::io::ErrorKind::Other,
                 err,
             )))),
-            None => {
-                // https://rust-unofficial.github.io/patterns/idioms/mem-replace.html
-                if let Sha256State::InProgress(sha256) = std::mem::take(&mut self.sha256state) {
-                    self.sha256state = Sha256State::Finalized(sha256.finalize());
-                }
-                info!("{:?}", self.sha256state);
-                Poll::Ready(None)
-            }
+            None => Poll::Ready(None),
+        }
+    }
+}
+
+impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for BodyStream<T> {
+    fn drop(&mut self) {
+        // https://rust-unofficial.github.io/patterns/idioms/mem-replace.html
+        if let Sha256State::InProgress(sha256) = std::mem::take(&mut self.sha256state) {
+            let digest = sha256.finalize();
+            info!("sha256: {:?}",base16::encode_lower(&digest));
+            self.sha256state = Sha256State::Finalized(digest);
         }
     }
 }
@@ -93,7 +97,7 @@ impl HttpHandler for WarcProxyHandler {
     async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
         info!("handle_response before {:?}", res);
         let (parts, body) = res.into_parts();
-        let body = Body::wrap_stream(ResponseStream::wrap(body));
+        let body = Body::wrap_stream(BodyStream::wrap(body));
         let rv = Response::from_parts(parts, body);
         info!("handle_response after {:?}", rv);
         rv
