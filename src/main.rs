@@ -18,20 +18,20 @@ use tempfile::SpooledTempFile;
 use tracing::{error, info}; // ::channel;
 
 #[derive(Debug)]
-struct BodyStream<T: Stream<Item = Result<Bytes, Error>> + Unpin> {
+struct ResponseStream<T: Stream<Item = Result<Bytes, Error>> + Unpin> {
     tx: Option<mpsc::Sender<RequestInfo>>,
     request_info: Option<RequestInfo>,
     inner_stream: T,
     sha256: Option<Sha256>,
 }
 
-impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> BodyStream<T> {
+impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> ResponseStream<T> {
     fn wrap(
         tx: mpsc::Sender<RequestInfo>,
         request_info: RequestInfo,
         inner_stream: T,
-    ) -> BodyStream<T> {
-        BodyStream {
+    ) -> ResponseStream<T> {
+        ResponseStream {
             request_info: Some(request_info),
             tx: Some(tx),
             inner_stream,
@@ -40,7 +40,7 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> BodyStream<T> {
     }
 }
 
-impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for BodyStream<T> {
+impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for ResponseStream<T> {
     type Item = Result<Bytes, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
@@ -59,7 +59,7 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for BodyStream<T> {
     }
 }
 
-impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for BodyStream<T> {
+impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for ResponseStream<T> {
     fn drop(&mut self) {
         let mut request_info = self.request_info.take().unwrap();
         request_info.response_sha256 = Some(self.sha256.take().unwrap().finalize());
@@ -121,7 +121,7 @@ impl HttpHandler for ProxyTransactionHandler {
     async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
         let request_info = self.request_info.take().unwrap();
         let (parts, body) = res.into_parts();
-        let body = Body::wrap_stream(BodyStream::wrap(
+        let body = Body::wrap_stream(ResponseStream::wrap(
             self.tx.take().unwrap(),
             request_info,
             body,
