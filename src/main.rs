@@ -1,34 +1,39 @@
-use futures::Stream;
-use hudsucker::{async_trait::async_trait, certificate_authority::RcgenAuthority, hyper::{body::Bytes, Body, Error, Request, Response}, rustls, HttpContext, HttpHandler, Proxy, RequestOrResponse, NoopHandler};
+use futures::{channel::mpsc, SinkExt, Stream, StreamExt};
+use hudsucker::{
+    async_trait::async_trait,
+    certificate_authority::RcgenAuthority,
+    hyper::{body::Bytes, Body, Error, Request, Response},
+    rustls, HttpContext, HttpHandler, Proxy, RequestOrResponse,
+};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
 };
-use sha2::digest::Output;
-use sha2::{Digest, Sha256};
+use sha2::{digest::Output, Digest, Sha256};
 use std::{
-    collections::HashMap,
     net::SocketAddr,
     pin::Pin,
-    sync::atomic::{AtomicU64, Ordering},
-    sync::Mutex,
     task::{Context, Poll},
 };
-use hudsucker::hyper::client::HttpConnector;
 use tempfile::SpooledTempFile;
-use tracing::{error, info};
-use tokio::sync::mpsc; // ::channel;
+use tracing::{error, info}; // ::channel;
 
 #[derive(Debug)]
 struct BodyStream<T: Stream<Item = Result<Bytes, Error>> + Unpin> {
+    tx: Option<mpsc::Sender<RequestInfo>>,
     request_info: Option<RequestInfo>,
     inner_stream: T,
     sha256: Option<Sha256>,
 }
 
 impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> BodyStream<T> {
-    fn wrap(request_info: RequestInfo, inner_stream: T) -> BodyStream<T> {
+    fn wrap(
+        tx: mpsc::Sender<RequestInfo>,
+        request_info: RequestInfo,
+        inner_stream: T,
+    ) -> BodyStream<T> {
         BodyStream {
             request_info: Some(request_info),
+            tx: Some(tx),
             inner_stream,
             sha256: Some(Sha256::new()),
         }
@@ -58,6 +63,11 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for BodyStream<T> {
     fn drop(&mut self) {
         let mut request_info = self.request_info.take().unwrap();
         request_info.response_sha256 = Some(self.sha256.take().unwrap().finalize());
+        let mut tx = self.tx.take().unwrap();
+        tokio::spawn(async move {
+            info!("queuing {:?}", request_info.uri);
+            tx.send(request_info).await.expect("failed to queue");
+        });
     }
 }
 
@@ -77,13 +87,7 @@ struct RequestInfo {
 #[derive(Debug)]
 struct ProxyTransactionHandler {
     request_info: Option<RequestInfo>,
-}
-
-impl Default for ProxyTransactionHandler {
-    fn default() -> Self {
-        info!("🆕  creating ProxyTransactionHandler");
-        ProxyTransactionHandler { request_info: None }
-    }
+    tx: Option<mpsc::Sender<RequestInfo>>,
 }
 
 impl Clone for ProxyTransactionHandler {
@@ -91,6 +95,7 @@ impl Clone for ProxyTransactionHandler {
         ProxyTransactionHandler {
             // FIXME not kosher but hudsucker ought to be creating a new struct rather than cloning
             request_info: None,
+            tx: self.tx.clone(),
         }
     }
 }
@@ -116,7 +121,11 @@ impl HttpHandler for ProxyTransactionHandler {
     async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
         let request_info = self.request_info.take().unwrap();
         let (parts, body) = res.into_parts();
-        let body = Body::wrap_stream(BodyStream::wrap(request_info, body));
+        let body = Body::wrap_stream(BodyStream::wrap(
+            self.tx.take().unwrap(),
+            request_info,
+            body,
+        ));
         Response::from_parts(parts, body)
     }
 }
@@ -145,16 +154,27 @@ async fn main() {
     // console_subscriber::init();
     tracing_subscriber::fmt::init();
 
+    let (tx, mut rx) = mpsc::channel::<RequestInfo>(500);
+
     let ca = build_ca();
     let addr = SocketAddr::from(([127, 0, 0, 1], 8000));
     let proxy = Proxy::builder()
         .with_addr(addr)
         .with_rustls_client()
         .with_ca(ca)
-        .with_http_handler(ProxyTransactionHandler::default())
+        .with_http_handler(ProxyTransactionHandler {
+            tx: Some(tx),
+            request_info: None,
+        })
         .build();
 
     info!("proxy listening at {}", addr);
+
+    tokio::spawn(async move {
+        while let Some(request_info) = rx.next().await {
+            info!("dequeued {:?}", request_info.uri);
+        }
+    });
 
     if let Err(e) = proxy.start(shutdown_signal()).await {
         error!("proxy failed to start: {}", e);
