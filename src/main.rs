@@ -1,43 +1,36 @@
 use futures::Stream;
-use hudsucker::{
-    async_trait::async_trait,
-    certificate_authority::RcgenAuthority,
-    hyper::{body::Bytes, Body, Error, Request, Response},
-    rustls, HttpContext, HttpHandler, Proxy, RequestOrResponse,
-};
+use hudsucker::{async_trait::async_trait, certificate_authority::RcgenAuthority, hyper::{body::Bytes, Body, Error, Request, Response}, rustls, HttpContext, HttpHandler, Proxy, RequestOrResponse, NoopHandler};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
 };
 use sha2::digest::Output;
 use sha2::{Digest, Sha256};
-use std::net::SocketAddr;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
+    sync::Mutex,
+    task::{Context, Poll},
+};
+use hudsucker::hyper::client::HttpConnector;
+use tempfile::SpooledTempFile;
 use tracing::{error, info};
-
-#[derive(Debug)]
-enum Sha256State {
-    InProgress(Sha256),
-    Finalized(Output<Sha256>),
-}
-
-impl Default for Sha256State {
-    fn default() -> Self {
-        Sha256State::InProgress(Sha256::new())
-    }
-}
+use tokio::sync::mpsc; // ::channel;
 
 #[derive(Debug)]
 struct BodyStream<T: Stream<Item = Result<Bytes, Error>> + Unpin> {
+    request_info: Option<RequestInfo>,
     inner_stream: T,
-    sha256state: Sha256State,
+    sha256: Option<Sha256>,
 }
 
 impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> BodyStream<T> {
-    fn wrap(inner_stream: T) -> BodyStream<T> {
+    fn wrap(request_info: RequestInfo, inner_stream: T) -> BodyStream<T> {
         BodyStream {
+            request_info: Some(request_info),
             inner_stream,
-            sha256state: Sha256State::InProgress(Sha256::new()),
+            sha256: Some(Sha256::new()),
         }
     }
 }
@@ -49,9 +42,7 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for BodyStream<T> {
         match futures::ready!(Pin::new(&mut self.inner_stream).poll_next(cx)) {
             Some(Ok(chunk)) => {
                 info!("{:?}", chunk);
-                if let Sha256State::InProgress(sha256) = &mut self.sha256state {
-                    sha256.update(&chunk);
-                }
+                self.sha256.as_mut().unwrap().update(&chunk);
                 Poll::Ready(Some(Ok(chunk)))
             }
             Some(Err(err)) => Poll::Ready(Some(Err(std::io::Error::new(
@@ -65,12 +56,8 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for BodyStream<T> {
 
 impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for BodyStream<T> {
     fn drop(&mut self) {
-        // https://rust-unofficial.github.io/patterns/idioms/mem-replace.html
-        if let Sha256State::InProgress(sha256) = std::mem::take(&mut self.sha256state) {
-            let digest = sha256.finalize();
-            info!("sha256: {:?}",base16::encode_lower(&digest));
-            self.sha256state = Sha256State::Finalized(digest);
-        }
+        let mut request_info = self.request_info.take().unwrap();
+        request_info.response_sha256 = Some(self.sha256.take().unwrap().finalize());
     }
 }
 
@@ -80,27 +67,57 @@ async fn shutdown_signal() {
         .expect("Failed to install CTRL+C signal handler");
 }
 
-#[derive(Clone)]
-struct WarcProxyHandler;
+#[derive(Debug)]
+struct RequestInfo {
+    uri: String,
+    response_sha256: Option<Output<Sha256>>,
+    response_buf: Option<SpooledTempFile>,
+}
+
+#[derive(Debug)]
+struct ProxyTransactionHandler {
+    request_info: Option<RequestInfo>,
+}
+
+impl Default for ProxyTransactionHandler {
+    fn default() -> Self {
+        info!("🆕  creating ProxyTransactionHandler");
+        ProxyTransactionHandler { request_info: None }
+    }
+}
+
+impl Clone for ProxyTransactionHandler {
+    fn clone(&self) -> Self {
+        ProxyTransactionHandler {
+            // FIXME not kosher but hudsucker ought to be creating a new struct rather than cloning
+            request_info: None,
+        }
+    }
+}
 
 #[async_trait]
-impl HttpHandler for WarcProxyHandler {
+impl HttpHandler for ProxyTransactionHandler {
     async fn handle_request(
         &mut self,
         _ctx: &HttpContext,
         req: Request<Body>,
     ) -> RequestOrResponse {
         info!("{:?}", req);
-        req.into()
+        let (parts, body) = req.into_parts();
+        info!("handle_request uri={:?}", parts.uri.to_string());
+        self.request_info = Some(RequestInfo {
+            uri: parts.uri.to_string(),
+            response_sha256: None,
+            response_buf: None,
+        });
+        Request::from_parts(parts, body).into()
     }
 
     async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
-        info!("handle_response before {:?}", res);
+        let request_info = self.request_info.take().unwrap();
         let (parts, body) = res.into_parts();
-        let body = Body::wrap_stream(BodyStream::wrap(body));
-        let rv = Response::from_parts(parts, body);
-        info!("handle_response after {:?}", rv);
-        rv
+        let body = Body::wrap_stream(BodyStream::wrap(request_info, body));
+        Response::from_parts(parts, body)
     }
 }
 
@@ -134,7 +151,7 @@ async fn main() {
         .with_addr(addr)
         .with_rustls_client()
         .with_ca(ca)
-        .with_http_handler(WarcProxyHandler)
+        .with_http_handler(ProxyTransactionHandler::default())
         .build();
 
     info!("proxy listening at {}", addr);
