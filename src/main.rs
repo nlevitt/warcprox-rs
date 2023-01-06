@@ -1,22 +1,27 @@
-use futures::{channel::mpsc, SinkExt, Stream, StreamExt};
-use hudsucker::{
-    async_trait::async_trait,
-    certificate_authority::RcgenAuthority,
-    hyper::{body::Bytes, Body, Error, Request, Response},
-    rustls, HttpContext, HttpHandler, Proxy, RequestOrResponse,
-};
-use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
-};
-use sha2::{digest::Output, Digest, Sha256};
+use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::{
     net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
 };
+
+use chrono::Utc;
+use futures::{channel::mpsc, SinkExt, Stream, StreamExt};
+use rcgen::{
+    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
+};
+use sha2::{digest::Output, Digest, Sha256};
 use tempfile::SpooledTempFile;
-use tracing::{error, info}; // ::channel;
+use tracing::{error, info};
+
+use hudsucker::{
+    async_trait::async_trait,
+    certificate_authority::RcgenAuthority,
+    hyper::{body::Bytes, Body, Error, Request, Response},
+    rustls, HttpContext, HttpHandler, Proxy, RequestOrResponse,
+};
+use warcio::{WarcRecordBuilder, WarcRecordType, WarcWriter};
 
 const SPOOLED_TEMPFILE_MAX_SIZE: usize = 512 * 1024;
 
@@ -74,7 +79,7 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for ResponseStream<T> 
         let mut recorded_url: RecordedUrl = self.recorded_url.take().unwrap();
         recorded_url.response_sha256 = Some(self.sha256.take().unwrap().finalize());
         let mut response_recorder = self.recorder.take().unwrap();
-        response_recorder.seek(SeekFrom::End(0)).unwrap(); // length of file
+        recorded_url.payload_length = response_recorder.seek(SeekFrom::End(0)).unwrap();
         response_recorder
             .seek(SeekFrom::Start(0))
             .expect("failed to seek to start of spooled tempfile");
@@ -99,6 +104,7 @@ struct RecordedUrl {
     uri: String,
     response_sha256: Option<Output<Sha256>>,
     response_recorder: Option<SpooledTempFile>,
+    payload_length: u64,
 }
 
 #[derive(Debug)]
@@ -124,13 +130,13 @@ impl HttpHandler for ProxyTransactionHandler {
         _ctx: &HttpContext,
         req: Request<Body>,
     ) -> RequestOrResponse {
-        info!("{:?}", req);
         let (parts, body) = req.into_parts();
         info!("handle_request uri={:?}", parts.uri.to_string());
         self.recorded_url = Some(RecordedUrl {
             uri: parts.uri.to_string(),
             response_sha256: None,
             response_recorder: None,
+            payload_length: 0,
         });
         Request::from_parts(parts, body).into()
     }
@@ -188,9 +194,38 @@ async fn main() {
     info!("proxy listening at {}", addr);
 
     tokio::spawn(async move {
+        // WARC/1.0
+        // WARC-Type: response
+        // WARC-Record-ID: <urn:uuid:6a050210-b1f2-42c9-944a-b1e7c63efec7>
+        // WARC-Date: 2023-01-05T08:07:26Z
+        // WARC-Target-URI: https://httpbin.org/get
+        // WARC-IP-Address: 54.163.169.210
+        // Content-Type: application/http;msgtype=response
+        // WARC-Payload-Digest: sha1:66777e0225f14e2667e794d3cd1714ba0a639cf7
+        // Content-Length: 485
+        // WARC-Block-Digest: sha1:666cb28dbda701b12ddbcf779c735aa2e672ac23
+        //
+        let f = OpenOptions::new()
+            .create(true) // .create_new(true)
+            .append(true) // .write(true)
+            .open("warcprox-rs.warc")?;
+        let mut warc_writer = WarcWriter::from(f);
+
         while let Some(recorded_url) = rx.next().await {
-            info!("dequeued {:?}", recorded_url.uri);
+            let record = WarcRecordBuilder::new()
+                .warc_type(WarcRecordType::Response)
+                .warc_date(Utc::now())
+                .warc_target_uri(recorded_url.uri.as_bytes())
+                // .warc_ip_address
+                .content_type(b"application/http;msgtype=response")
+                .content_length(recorded_url.payload_length)
+                .body(Box::new(recorded_url.response_recorder.unwrap()))
+                .build();
+            warc_writer.write_record(record)?;
+            info!("wrote to warc: {:?}", recorded_url.uri);
         }
+
+        Ok::<(), std::io::Error>(())
     });
 
     if let Err(e) = proxy.start(shutdown_signal()).await {

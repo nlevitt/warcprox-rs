@@ -15,7 +15,10 @@ futures = "0.3.25"
 sha2 = "0.10.6"
 base16 = "0.2.1"
 tempfile = "3.3.0"
+chrono = "0.4.23"
+warcio = "0.1.0"
 
 [patch.crates-io]
 hudsucker = { path = "../hudsucker" }
 hyper = { path = "../hyper" }
+warcio = { path = "../warcio-rs" }
