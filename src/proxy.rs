@@ -6,6 +6,7 @@ use hudsucker::hyper::{Body, Error, Request, Response};
 use hudsucker::{HttpContext, HttpHandler, RequestOrResponse};
 use sha2::digest::Output;
 use sha2::{Digest, Sha256};
+use std::fmt::Debug;
 use std::io::{Seek, SeekFrom, Write};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -66,13 +67,13 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for ResponseStream<T
 impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for ResponseStream<T> {
     fn drop(&mut self) {
         let mut recorded_url: RecordedUrl = self.recorded_url.take().unwrap();
-        recorded_url.response_sha256 = Some(self.sha256.take().unwrap().finalize());
+        recorded_url.response_payload_sha256 = Some(self.sha256.take().unwrap().finalize());
         let mut response_recorder = self.recorder.take().unwrap();
         recorded_url.payload_length = response_recorder.seek(SeekFrom::End(0)).unwrap();
         response_recorder
             .seek(SeekFrom::Start(0))
             .expect("error seeking to start of spooled temp file");
-        recorded_url.response_recorder = Some(response_recorder);
+        recorded_url.response_payload_recorder = Some(response_recorder);
 
         let mut tx = self.tx.take().unwrap();
         tokio::spawn(async move {
@@ -85,8 +86,10 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for ResponseStream<T> 
 #[derive(Debug)]
 pub(crate) struct RecordedUrl {
     pub(crate) uri: String,
-    pub(crate) response_sha256: Option<Output<Sha256>>,
-    pub(crate) response_recorder: Option<SpooledTempFile>,
+    pub(crate) response_status_line: Option<Vec<u8>>,
+    pub(crate) response_headers: Option<Vec<u8>>,
+    pub(crate) response_payload_sha256: Option<Output<Sha256>>,
+    pub(crate) response_payload_recorder: Option<SpooledTempFile>,
     pub(crate) payload_length: u64,
 }
 
@@ -117,16 +120,37 @@ impl HttpHandler for ProxyTransactionHandler {
         info!("handle_request uri={:?}", parts.uri.to_string());
         self.recorded_url = Some(RecordedUrl {
             uri: parts.uri.to_string(),
-            response_sha256: None,
-            response_recorder: None,
+            response_status_line: None,
+            response_headers: None,
+            response_payload_sha256: None,
+            response_payload_recorder: None,
             payload_length: 0,
         });
         Request::from_parts(parts, body).into()
     }
 
     async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
-        let recorded_url = self.recorded_url.take().unwrap();
+        let mut recorded_url = self.recorded_url.take().unwrap();
         let (parts, body) = res.into_parts();
+
+        recorded_url.response_status_line = Some(Vec::from(
+            format!(
+                "{:?} {} {}\r\n",
+                parts.version,
+                parts.status.as_u16(),
+                parts.status.canonical_reason().unwrap()
+            )
+            .as_bytes(),
+        ));
+        let mut headers_buf = Vec::new();
+        for (name, value) in &parts.headers {
+            headers_buf.extend_from_slice(name.as_str().as_bytes());
+            headers_buf.extend_from_slice(b": ");
+            headers_buf.extend_from_slice(value.as_bytes());
+            headers_buf.extend_from_slice(b"\r\n");
+        }
+        recorded_url.response_headers = Some(headers_buf);
+
         let body = Body::wrap_stream(ResponseStream::wrap(
             self.tx.take().unwrap(),
             recorded_url,

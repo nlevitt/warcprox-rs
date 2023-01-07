@@ -3,6 +3,7 @@ use crate::proxy::RecordedUrl;
 use chrono::Utc;
 use futures::{channel::mpsc::Receiver, StreamExt};
 use std::fs::OpenOptions;
+use std::io::{Cursor, Read};
 use tracing::info;
 use warcio::{WarcRecordBuilder, WarcRecordType, WarcWriter};
 
@@ -25,15 +26,24 @@ pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>) {
             .open("warcprox-rs.warc")?;
         let mut warc_writer = WarcWriter::from(f);
 
-        while let Some(recorded_url) = rx.next().await {
+        while let Some(mut recorded_url) = rx.next().await {
+            let full_http_response_length: u64 = recorded_url.response_status_line.as_ref().unwrap().len() as u64
+                + recorded_url.response_headers.as_ref().unwrap().len() as u64
+                + 2
+                + recorded_url.payload_length;
+            let full_http_response = Cursor::new(recorded_url.response_status_line.take().unwrap())
+                .chain(Cursor::new(recorded_url.response_headers.take().unwrap()))
+                .chain(&b"\r\n"[..])
+                .chain(recorded_url.response_payload_recorder.unwrap());
+
             let record = WarcRecordBuilder::new()
                 .warc_type(WarcRecordType::Response)
                 .warc_date(Utc::now())
                 .warc_target_uri(recorded_url.uri.as_bytes())
                 // .warc_ip_address
                 .content_type(b"application/http;msgtype=response")
-                .content_length(recorded_url.payload_length)
-                .body(Box::new(recorded_url.response_recorder.unwrap()))
+                .content_length(full_http_response_length)
+                .body(Box::new(full_http_response))
                 .build();
             warc_writer.write_record(record)?;
             info!("wrote to warc: {:?}", recorded_url.uri);
