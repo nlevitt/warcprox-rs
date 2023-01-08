@@ -1,7 +1,8 @@
+use clap::Parser;
 use futures::channel::mpsc;
 use hudsucker::Proxy;
 use proxy::{ProxyTransactionHandler, RecordedUrl};
-use std::net::SocketAddr;
+use std::net::ToSocketAddrs as _;
 use tracing::{error, info};
 
 use crate::postfetch::spawn_postfetch;
@@ -16,16 +17,33 @@ async fn shutdown_signal() {
         .expect("failed to install ctrl+c signal handler");
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short = 'p', long, default_value_t = 8000)]
+    port: u16,
+
+    #[arg(short = 'b', long, default_value = "localhost")]
+    address: String,
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
+
+    let args = Args::parse();
+    info!("args=${:?}", args);
+    let addr = format!("{}:{}", args.address, args.port)
+        .to_socket_addrs()
+        .unwrap()
+        .next()
+        .unwrap();
 
     let (tx, rx) = mpsc::channel::<RecordedUrl>(500);
 
     spawn_postfetch(rx);
 
     let ca = ca::build_ca();
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8000));
     let proxy = Proxy::builder()
         .with_addr(addr)
         .with_rustls_client()

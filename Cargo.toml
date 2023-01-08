@@ -17,7 +17,7 @@ base16 = "0.2.1"
 tempfile = "3.3.0"
 chrono = "0.4.23"
 warcio = { git = "https://github.com/nlevitt/warcio-rs" }
-clap = "4.0.32"
+clap = { version = "4.0.32", features = ["derive"] }
 
 [patch.crates-io]
 hudsucker = { path = "../hudsucker" }
