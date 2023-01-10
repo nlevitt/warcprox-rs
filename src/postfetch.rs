@@ -1,13 +1,14 @@
 use crate::proxy::RecordedUrl;
 
 use chrono::Utc;
-use futures::{channel::mpsc::Receiver, StreamExt};
+use futures::channel::mpsc::Receiver;
+use futures::StreamExt;
 use std::fs::OpenOptions;
 use std::io::{Cursor, Read};
 use tracing::info;
 use warcio::{WarcRecordBuilder, WarcRecordType, WarcWriter};
 
-pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>) {
+pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
     tokio::spawn(async move {
         // WARC/1.0
         // WARC-Type: response
@@ -23,14 +24,19 @@ pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>) {
         let f = OpenOptions::new()
             .create(true) // .create_new(true)
             .append(true) // .write(true)
-            .open("warcprox-rs.warc")?;
-        let mut warc_writer = WarcWriter::from(f);
+            .open(if gzip {
+                "warcprox-rs.warc.gz"
+            } else {
+                "warcprox-rs.warc"
+            })?;
+        let mut warc_writer = WarcWriter::new(f, gzip);
 
         while let Some(mut recorded_url) = rx.next().await {
-            let full_http_response_length: u64 = recorded_url.response_status_line.as_ref().unwrap().len() as u64
-                + recorded_url.response_headers.as_ref().unwrap().len() as u64
-                + 2
-                + recorded_url.payload_length;
+            let full_http_response_length: u64 =
+                recorded_url.response_status_line.as_ref().unwrap().len() as u64
+                    + recorded_url.response_headers.as_ref().unwrap().len() as u64
+                    + 2
+                    + recorded_url.payload_length;
             let full_http_response = Cursor::new(recorded_url.response_status_line.take().unwrap())
                 .chain(Cursor::new(recorded_url.response_headers.take().unwrap()))
                 .chain(&b"\r\n"[..])

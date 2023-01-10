@@ -25,6 +25,14 @@ struct Args {
 
     #[arg(short = 'b', long, default_value = "localhost")]
     address: String,
+
+    #[arg(
+        short = 'z',
+        long,
+        default_value_t = false,
+        help = "write gzip-compressed warc records"
+    )]
+    gzip: bool,
 }
 
 #[tokio::main]
@@ -41,7 +49,7 @@ async fn main() {
 
     let (tx, rx) = mpsc::channel::<RecordedUrl>(500);
 
-    spawn_postfetch(rx);
+    spawn_postfetch(rx, args.gzip);
 
     let ca = ca::build_ca();
     let proxy = Proxy::builder()
