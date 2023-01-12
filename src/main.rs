@@ -12,9 +12,7 @@ mod postfetch;
 mod proxy;
 
 async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install ctrl+c signal handler");
+    tokio::signal::ctrl_c().await.unwrap();
 }
 
 #[derive(Parser, Debug)]
@@ -40,7 +38,6 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
-    info!("args=${:?}", args);
     let addr = format!("{}:{}", args.address, args.port)
         .to_socket_addrs()
         .unwrap()

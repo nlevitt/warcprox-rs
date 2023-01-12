@@ -1,7 +1,10 @@
+use futures::channel::mpsc::Sender;
+use futures::channel::oneshot::Receiver;
 use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, Stream};
 use hudsucker::async_trait::async_trait;
 use hudsucker::hyper::body::Bytes;
+use hudsucker::hyper::http::{request, response};
 use hudsucker::hyper::{Body, Error, HeaderMap, Method, Request, Response};
 use hudsucker::{HttpContext, HttpHandler, RequestOrResponse};
 use sha2::digest::Output;
@@ -24,7 +27,7 @@ struct PayloadStream<T: Stream<Item = Result<Bytes, Error>> + Unpin> {
 }
 
 impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> PayloadStream<T> {
-    fn wrap(tx: oneshot::Sender<Payload>, inner_stream: T) -> PayloadStream<T> {
+    fn wrap(inner_stream: T, tx: oneshot::Sender<Payload>) -> PayloadStream<T> {
         PayloadStream {
             inner_stream,
             sha256: Some(Sha256::new()),
@@ -40,13 +43,8 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for PayloadStream<T>
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         match futures::ready!(Pin::new(&mut self.inner_stream).poll_next(cx)) {
             Some(Ok(chunk)) => {
-                info!("{:?}", chunk);
                 self.sha256.as_mut().unwrap().update(&chunk);
-                self.recorder
-                    .as_mut()
-                    .unwrap()
-                    .write_all(&chunk)
-                    .expect("error writing to spooled temp file");
+                self.recorder.as_mut().unwrap().write_all(&chunk).unwrap();
                 Poll::Ready(Some(Ok(chunk)))
             }
             Some(Err(err)) => Poll::Ready(Some(Err(std::io::Error::new(
@@ -63,7 +61,6 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for PayloadStream<T> {
         let mut payload: SpooledTempFile = self.recorder.take().unwrap();
         let sha256: Output<Sha256> = self.sha256.take().unwrap().finalize();
         let length = payload.seek(SeekFrom::End(0)).unwrap();
-        info!("drop: length={}", length);
         payload.seek(SeekFrom::Start(0)).unwrap();
 
         self.tx
@@ -138,6 +135,46 @@ fn headers_as_bytes(headers: &HeaderMap) -> Vec<u8> {
     buf
 }
 
+fn response_status_line_as_bytes(parts: &response::Parts) -> Vec<u8> {
+    Vec::from(
+        format!(
+            "{:?} {} {}\r\n",
+            parts.version,
+            parts.status.as_u16(),
+            parts.status.canonical_reason().unwrap()
+        )
+        .as_bytes(),
+    )
+}
+
+fn request_status_line_as_bytes(parts: &request::Parts) -> Vec<u8> {
+    Vec::from(
+        format!(
+            "{} {} {:?}\r\n",
+            parts.method,
+            parts.uri.path_and_query().unwrap(),
+            parts.version
+        )
+        .as_bytes(),
+    )
+}
+
+fn await_payloads_and_queue_postfetch(
+    mut recorded_url: RecordedUrl,
+    request_payload_rx: Receiver<Payload>,
+    response_payload_rx: Receiver<Payload>,
+    mut recorded_url_tx: Sender<RecordedUrl>,
+) {
+    tokio::spawn(async move {
+        let request_payload = request_payload_rx.await.unwrap();
+        recorded_url.request_payload = Some(request_payload);
+
+        let payload = response_payload_rx.await.unwrap();
+        recorded_url.response_payload = Some(payload);
+        recorded_url_tx.send(recorded_url).await.unwrap();
+    });
+}
+
 #[async_trait]
 impl HttpHandler for ProxyTransactionHandler {
     async fn handle_request(
@@ -151,17 +188,7 @@ impl HttpHandler for ProxyTransactionHandler {
             return Request::from_parts(parts, body).into();
         }
 
-        info!("handle_request uri={:?}", parts.uri.to_string());
-
-        let request_line = Some(Vec::from(
-            format!(
-                "{} {} {:?}\r\n",
-                parts.method,
-                parts.uri.path_and_query().unwrap(),
-                parts.version
-            )
-            .as_bytes(),
-        ));
+        let request_line = Some(request_status_line_as_bytes(&parts));
         self.recorded_url = Some(RecordedUrl {
             uri: parts.uri.to_string(),
             request_line,
@@ -173,7 +200,7 @@ impl HttpHandler for ProxyTransactionHandler {
         });
 
         let (request_payload_tx, request_payload_rx) = oneshot::channel::<Payload>();
-        let body = Body::wrap_stream(PayloadStream::wrap(request_payload_tx, body));
+        let body = Body::wrap_stream(PayloadStream::wrap(body, request_payload_tx));
         self.request_payload_rx = Some(request_payload_rx);
         Request::from_parts(parts, body).into()
     }
@@ -183,42 +210,25 @@ impl HttpHandler for ProxyTransactionHandler {
         _ctx: &HttpContext,
         response: Response<Body>,
     ) -> Response<Body> {
-        info!(
-            "ProxyTransactionHandler::handle_response: self.is_connect={}",
-            self.is_connect
-        );
         if self.is_connect {
             return response;
         }
 
-        let mut recorded_url = self.recorded_url.take().unwrap();
-
-        let request_payload = self.request_payload_rx.take().unwrap().await.unwrap();
-        recorded_url.request_payload = Some(request_payload);
-
         let (parts, body) = response.into_parts();
 
-        recorded_url.response_status_line = Some(Vec::from(
-            format!(
-                "{:?} {} {}\r\n",
-                parts.version,
-                parts.status.as_u16(),
-                parts.status.canonical_reason().unwrap()
-            )
-            .as_bytes(),
-        ));
+        let mut recorded_url = self.recorded_url.take().unwrap();
+        recorded_url.response_status_line = Some(response_status_line_as_bytes(&parts));
         recorded_url.response_headers = Some(headers_as_bytes(&parts.headers));
 
         let (response_payload_tx, response_payload_rx) = oneshot::channel::<Payload>();
-        let body = Body::wrap_stream(PayloadStream::wrap(response_payload_tx, body));
+        let body = Body::wrap_stream(PayloadStream::wrap(body, response_payload_tx));
 
-        let mut recorded_url_tx = self.recorded_url_tx.take().unwrap();
-        tokio::spawn(async move {
-            let payload = response_payload_rx.await.unwrap();
-            recorded_url.response_payload = Some(payload);
-            info!("queuing {:?}", recorded_url.uri);
-            recorded_url_tx.send(recorded_url).await.unwrap();
-        });
+        await_payloads_and_queue_postfetch(
+            recorded_url,
+            self.request_payload_rx.take().unwrap(),
+            response_payload_rx,
+            self.recorded_url_tx.take().unwrap(),
+        );
 
         Response::from_parts(parts, body)
     }
