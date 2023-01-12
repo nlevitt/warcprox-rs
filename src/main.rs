@@ -57,7 +57,7 @@ async fn main() {
         .with_rustls_client()
         .with_ca(ca)
         .with_http_handler(ProxyTransactionHandler {
-            tx: Some(tx),
+            recorded_url_tx: Some(tx),
             recorded_url: None,
         })
         .build();

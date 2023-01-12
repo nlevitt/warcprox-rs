@@ -1,4 +1,4 @@
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, Stream};
 use hudsucker::async_trait::async_trait;
 use hudsucker::hyper::body::Bytes;
@@ -16,31 +16,28 @@ use tracing::info;
 const SPOOLED_TEMPFILE_MAX_SIZE: usize = 512 * 1024;
 
 #[derive(Debug)]
-struct ResponseStream<T: Stream<Item = Result<Bytes, Error>> + Unpin> {
-    tx: Option<mpsc::Sender<RecordedUrl>>,
-    recorded_url: Option<RecordedUrl>,
+struct PayloadStream<T: Stream<Item = Result<Bytes, Error>> + Unpin> {
     inner_stream: T,
     sha256: Option<Sha256>,
     recorder: Option<SpooledTempFile>,
+    tx: Option<oneshot::Sender<(SpooledTempFile, Output<Sha256>, u64)>>,
 }
 
-impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> ResponseStream<T> {
+impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> PayloadStream<T> {
     fn wrap(
-        tx: mpsc::Sender<RecordedUrl>,
-        recorded_url: RecordedUrl,
+        tx: oneshot::Sender<(SpooledTempFile, Output<Sha256>, u64)>,
         inner_stream: T,
-    ) -> ResponseStream<T> {
-        ResponseStream {
-            recorded_url: Some(recorded_url),
-            tx: Some(tx),
+    ) -> PayloadStream<T> {
+        PayloadStream {
             inner_stream,
             sha256: Some(Sha256::new()),
             recorder: Some(SpooledTempFile::new(SPOOLED_TEMPFILE_MAX_SIZE)),
+            tx: Some(tx),
         }
     }
 }
 
-impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for ResponseStream<T> {
+impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for PayloadStream<T> {
     type Item = Result<Bytes, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
@@ -64,39 +61,44 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Stream for ResponseStream<T
     }
 }
 
-impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for ResponseStream<T> {
+impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for PayloadStream<T> {
     fn drop(&mut self) {
-        let mut recorded_url: RecordedUrl = self.recorded_url.take().unwrap();
-        recorded_url.response_payload_sha256 = Some(self.sha256.take().unwrap().finalize());
-        let mut response_recorder = self.recorder.take().unwrap();
-        recorded_url.payload_length = response_recorder.seek(SeekFrom::End(0)).unwrap();
-        response_recorder
-            .seek(SeekFrom::Start(0))
-            .expect("error seeking to start of spooled temp file");
-        recorded_url.response_payload_recorder = Some(response_recorder);
+        // let mut recorded_url: RecordedUrl = self.recorded_url.take().unwrap();
+        let mut payload: SpooledTempFile = self.recorder.take().unwrap();
+        let sha256: Output<Sha256> = self.sha256.take().unwrap().finalize();
+        let length = payload.seek(SeekFrom::End(0)).unwrap();
+        payload.seek(SeekFrom::Start(0)).unwrap();
 
-        let mut tx = self.tx.take().unwrap();
-        tokio::spawn(async move {
-            info!("queuing {:?}", recorded_url.uri);
-            tx.send(recorded_url).await.expect("failed to queue");
-        });
+        self.tx
+            .take()
+            .unwrap()
+            .send((payload, sha256, length))
+            .unwrap();
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct Payload {
+    pub(crate) sha256: Output<Sha256>,
+    pub(crate) payload: SpooledTempFile,
+    pub(crate) length: u64,
 }
 
 #[derive(Debug)]
 pub(crate) struct RecordedUrl {
     pub(crate) uri: String,
+    pub(crate) request_line: Option<Vec<u8>>,
+    pub(crate) request_headers: Option<Vec<u8>>,
+    pub(crate) request_payload: Option<Payload>,
     pub(crate) response_status_line: Option<Vec<u8>>,
     pub(crate) response_headers: Option<Vec<u8>>,
-    pub(crate) response_payload_sha256: Option<Output<Sha256>>,
-    pub(crate) response_payload_recorder: Option<SpooledTempFile>,
-    pub(crate) payload_length: u64,
+    pub(crate) response_payload: Option<Payload>,
 }
 
 #[derive(Debug)]
 pub(crate) struct ProxyTransactionHandler {
     pub(crate) recorded_url: Option<RecordedUrl>,
-    pub(crate) tx: Option<mpsc::Sender<RecordedUrl>>,
+    pub(crate) recorded_url_tx: Option<mpsc::Sender<RecordedUrl>>,
 }
 
 impl Clone for ProxyTransactionHandler {
@@ -104,7 +106,7 @@ impl Clone for ProxyTransactionHandler {
         ProxyTransactionHandler {
             // FIXME not kosher but hudsucker ought to be creating a new struct rather than cloning
             recorded_url: None,
-            tx: self.tx.clone(),
+            recorded_url_tx: self.recorded_url_tx.clone(),
         }
     }
 }
@@ -120,18 +122,23 @@ impl HttpHandler for ProxyTransactionHandler {
         info!("handle_request uri={:?}", parts.uri.to_string());
         self.recorded_url = Some(RecordedUrl {
             uri: parts.uri.to_string(),
+            request_line: None,
+            request_headers: None,
+            request_payload: None,
             response_status_line: None,
             response_headers: None,
-            response_payload_sha256: None,
-            response_payload_recorder: None,
-            payload_length: 0,
+            response_payload: None,
         });
         Request::from_parts(parts, body).into()
     }
 
-    async fn handle_response(&mut self, _ctx: &HttpContext, res: Response<Body>) -> Response<Body> {
+    async fn handle_response(
+        &mut self,
+        _ctx: &HttpContext,
+        response: Response<Body>,
+    ) -> Response<Body> {
         let mut recorded_url = self.recorded_url.take().unwrap();
-        let (parts, body) = res.into_parts();
+        let (parts, body) = response.into_parts();
 
         recorded_url.response_status_line = Some(Vec::from(
             format!(
@@ -151,11 +158,22 @@ impl HttpHandler for ProxyTransactionHandler {
         }
         recorded_url.response_headers = Some(headers_buf);
 
-        let body = Body::wrap_stream(ResponseStream::wrap(
-            self.tx.take().unwrap(),
-            recorded_url,
-            body,
-        ));
+        let (response_payload_tx, response_payload_rx) =
+            oneshot::channel::<(SpooledTempFile, Output<Sha256>, u64)>();
+        let body = Body::wrap_stream(PayloadStream::wrap(response_payload_tx, body));
+
+        let mut recorded_url_tx = self.recorded_url_tx.take().unwrap();
+        tokio::spawn(async move {
+            let (payload, sha256, length) = response_payload_rx.await.unwrap();
+            recorded_url.response_payload = Some(Payload {
+                payload,
+                sha256,
+                length,
+            });
+            info!("queuing {:?}", recorded_url.uri);
+            recorded_url_tx.send(recorded_url).await.unwrap();
+        });
+
         Response::from_parts(parts, body)
     }
 }

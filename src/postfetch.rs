@@ -36,11 +36,11 @@ pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
                 recorded_url.response_status_line.as_ref().unwrap().len() as u64
                     + recorded_url.response_headers.as_ref().unwrap().len() as u64
                     + 2
-                    + recorded_url.payload_length;
+                    + recorded_url.response_payload.as_ref().unwrap().length;
             let full_http_response = Cursor::new(recorded_url.response_status_line.take().unwrap())
                 .chain(Cursor::new(recorded_url.response_headers.take().unwrap()))
                 .chain(&b"\r\n"[..])
-                .chain(recorded_url.response_payload_recorder.unwrap());
+                .chain(recorded_url.response_payload.take().unwrap().payload);
 
             let record = WarcRecordBuilder::new()
                 .warc_type(WarcRecordType::Response)
