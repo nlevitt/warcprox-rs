@@ -2,7 +2,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, Stream};
 use hudsucker::async_trait::async_trait;
 use hudsucker::hyper::body::Bytes;
-use hudsucker::hyper::{Body, Error, HeaderMap, Request, Response};
+use hudsucker::hyper::{Body, Error, HeaderMap, Method, Request, Response};
 use hudsucker::{HttpContext, HttpHandler, RequestOrResponse};
 use sha2::digest::Output;
 use sha2::{Digest, Sha256};
@@ -12,7 +12,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tempfile::SpooledTempFile;
 use tracing::info;
-use tracing::log::warn;
 
 const SPOOLED_TEMPFILE_MAX_SIZE: usize = 512 * 1024;
 
@@ -67,18 +66,15 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for PayloadStream<T> {
         info!("drop: length={}", length);
         payload.seek(SeekFrom::Start(0)).unwrap();
 
-        if let Some(tx) = self.tx.take() {
-            match tx.send(Payload {
+        self.tx
+            .take()
+            .unwrap()
+            .send(Payload {
                 payload,
                 sha256,
                 length,
-            }) {
-                Ok(()) => (),
-                Err(_) => {
-                    warn!("failed to send payload to oneshot length={}", length);
-                }
-            }
-        }
+            })
+            .unwrap();
     }
 }
 
@@ -105,6 +101,7 @@ pub(crate) struct ProxyTransactionHandler {
     pub(crate) recorded_url: Option<RecordedUrl>,
     pub(crate) recorded_url_tx: Option<mpsc::Sender<RecordedUrl>>,
     request_payload_rx: Option<oneshot::Receiver<Payload>>,
+    is_connect: bool,
 }
 
 impl ProxyTransactionHandler {
@@ -113,6 +110,7 @@ impl ProxyTransactionHandler {
             recorded_url_tx: Some(recorded_url_tx),
             recorded_url: None,
             request_payload_rx: None,
+            is_connect: false,
         }
     }
 }
@@ -124,6 +122,7 @@ impl Clone for ProxyTransactionHandler {
             recorded_url: None,
             recorded_url_tx: self.recorded_url_tx.clone(),
             request_payload_rx: None,
+            is_connect: false,
         }
     }
 }
@@ -141,17 +140,27 @@ fn headers_as_bytes(headers: &HeaderMap) -> Vec<u8> {
 
 #[async_trait]
 impl HttpHandler for ProxyTransactionHandler {
-    // XXX ignore CONNECT here
     async fn handle_request(
         &mut self,
         _ctx: &HttpContext,
         req: Request<Body>,
     ) -> RequestOrResponse {
         let (parts, body) = req.into_parts();
+        if parts.method == Method::CONNECT {
+            self.is_connect = true;
+            return Request::from_parts(parts, body).into();
+        }
+
         info!("handle_request uri={:?}", parts.uri.to_string());
 
         let request_line = Some(Vec::from(
-            format!("{} {} {:?}\r\n", parts.method, parts.uri, parts.version).as_bytes(),
+            format!(
+                "{} {} {:?}\r\n",
+                parts.method,
+                parts.uri.path_and_query().unwrap(),
+                parts.version
+            )
+            .as_bytes(),
         ));
         self.recorded_url = Some(RecordedUrl {
             uri: parts.uri.to_string(),
@@ -174,6 +183,14 @@ impl HttpHandler for ProxyTransactionHandler {
         _ctx: &HttpContext,
         response: Response<Body>,
     ) -> Response<Body> {
+        info!(
+            "ProxyTransactionHandler::handle_response: self.is_connect={}",
+            self.is_connect
+        );
+        if self.is_connect {
+            return response;
+        }
+
         let mut recorded_url = self.recorded_url.take().unwrap();
 
         let request_payload = self.request_payload_rx.take().unwrap().await.unwrap();
