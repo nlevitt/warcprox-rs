@@ -52,6 +52,27 @@ pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
                 .body(Box::new(full_http_response))
                 .build();
             warc_writer.write_record(record)?;
+
+            let full_http_request_length: u64 = recorded_url.request_line.as_ref().unwrap().len()
+                as u64
+                + recorded_url.request_headers.as_ref().unwrap().len() as u64
+                + 2
+                + recorded_url.request_payload.as_ref().unwrap().length;
+            let full_http_request = Cursor::new(recorded_url.request_line.take().unwrap())
+                .chain(Cursor::new(recorded_url.request_headers.take().unwrap()))
+                .chain(&b"\r\n"[..])
+                .chain(recorded_url.request_payload.take().unwrap().payload);
+
+            let record = WarcRecordBuilder::new()
+                .warc_type(WarcRecordType::Request)
+                .warc_date(Utc::now())
+                .warc_target_uri(recorded_url.uri.as_bytes())
+                // .warc_ip_address
+                .content_type(b"application/http;msgtype=request")
+                .content_length(full_http_request_length)
+                .body(Box::new(full_http_request))
+                .build();
+            warc_writer.write_record(record)?;
             info!("wrote to warc: {:?}", recorded_url.uri);
         }
 

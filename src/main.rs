@@ -56,10 +56,7 @@ async fn main() {
         .with_addr(addr)
         .with_rustls_client()
         .with_ca(ca)
-        .with_http_handler(ProxyTransactionHandler {
-            recorded_url_tx: Some(tx),
-            recorded_url: None,
-        })
+        .with_http_handler(ProxyTransactionHandler::new(tx))
         .build();
 
     info!("proxy listening at {}", addr);
