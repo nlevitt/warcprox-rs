@@ -1,15 +1,17 @@
 use clap::Parser;
 use futures::channel::mpsc;
 use hudsucker::Proxy;
-use proxy::{ProxyTransactionHandler, RecordedUrl};
+use proxy::ProxyTransactionHandler;
 use std::net::ToSocketAddrs as _;
 use tracing::{error, info};
 
 use crate::postfetch::spawn_postfetch;
+use crate::recorded_url::RecordedUrl;
 
 mod ca;
 mod postfetch;
 mod proxy;
+mod recorded_url;
 
 async fn shutdown_signal() {
     tokio::signal::ctrl_c().await.unwrap();

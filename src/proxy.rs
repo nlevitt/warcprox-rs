@@ -1,5 +1,3 @@
-use futures::channel::mpsc::Sender;
-use futures::channel::oneshot::Receiver;
 use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, Stream};
 use hudsucker::async_trait::async_trait;
@@ -14,7 +12,8 @@ use std::io::{Seek, SeekFrom, Write};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tempfile::SpooledTempFile;
-use tracing::info;
+
+use crate::recorded_url::{Payload, RecordedUrl};
 
 const SPOOLED_TEMPFILE_MAX_SIZE: usize = 512 * 1024;
 
@@ -73,24 +72,6 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for PayloadStream<T> {
             })
             .unwrap();
     }
-}
-
-#[derive(Debug)]
-pub(crate) struct Payload {
-    pub(crate) sha256: Output<Sha256>,
-    pub(crate) payload: SpooledTempFile,
-    pub(crate) length: u64,
-}
-
-#[derive(Debug)]
-pub(crate) struct RecordedUrl {
-    pub(crate) uri: String,
-    pub(crate) request_line: Option<Vec<u8>>,
-    pub(crate) request_headers: Option<Vec<u8>>,
-    pub(crate) request_payload: Option<Payload>,
-    pub(crate) response_status_line: Option<Vec<u8>>,
-    pub(crate) response_headers: Option<Vec<u8>>,
-    pub(crate) response_payload: Option<Payload>,
 }
 
 #[derive(Debug)]
@@ -161,9 +142,9 @@ fn request_line_as_bytes(parts: &request::Parts) -> Vec<u8> {
 
 fn await_payloads_and_queue_postfetch(
     mut recorded_url: RecordedUrl,
-    request_payload_rx: Receiver<Payload>,
-    response_payload_rx: Receiver<Payload>,
-    mut recorded_url_tx: Sender<RecordedUrl>,
+    request_payload_rx: oneshot::Receiver<Payload>,
+    response_payload_rx: oneshot::Receiver<Payload>,
+    mut recorded_url_tx: mpsc::Sender<RecordedUrl>,
 ) {
     tokio::spawn(async move {
         let request_payload = request_payload_rx.await.unwrap();

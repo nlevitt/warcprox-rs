@@ -1,12 +1,9 @@
-use crate::proxy::RecordedUrl;
+use crate::recorded_url::RecordedUrl;
 
-use chrono::Utc;
 use futures::channel::mpsc::Receiver;
 use futures::StreamExt;
 use std::fs::OpenOptions;
-use std::io::{Cursor, Read};
-use tracing::info;
-use warcio::{WarcRecordBuilder, WarcRecordType, WarcWriter};
+use warcio::{WarcRecord, WarcWriter};
 
 pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
     tokio::spawn(async move {
@@ -31,53 +28,13 @@ pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
             })?;
         let mut warc_writer = WarcWriter::new(f, gzip);
 
-        while let Some(mut recorded_url) = rx.next().await {
-            let full_http_response_length: u64 =
-                recorded_url.response_status_line.as_ref().unwrap().len() as u64
-                    + recorded_url.response_headers.as_ref().unwrap().len() as u64
-                    + 2
-                    + recorded_url.response_payload.as_ref().unwrap().length;
-            let response_payload = recorded_url.response_payload.take().unwrap();
-            let full_http_response = Cursor::new(recorded_url.response_status_line.take().unwrap())
-                .chain(Cursor::new(recorded_url.response_headers.take().unwrap()))
-                .chain(&b"\r\n"[..])
-                .chain(response_payload.payload);
-
-            let record = WarcRecordBuilder::new()
-                .warc_type(WarcRecordType::Response)
-                .warc_date(Utc::now())
-                .warc_target_uri(recorded_url.uri.as_bytes())
-                // .warc_ip_address
-                .warc_payload_digest(format!("sha256:{:x}", &response_payload.sha256).as_bytes())
-                .content_type(b"application/http;msgtype=response")
-                .content_length(full_http_response_length)
-                .body(Box::new(full_http_response))
-                .build();
-            warc_writer.write_record(record)?;
-
-            let full_http_request_length: u64 = recorded_url.request_line.as_ref().unwrap().len()
-                as u64
-                + recorded_url.request_headers.as_ref().unwrap().len() as u64
-                + 2
-                + recorded_url.request_payload.as_ref().unwrap().length;
-            let request_payload = recorded_url.request_payload.take().unwrap();
-            let full_http_request = Cursor::new(recorded_url.request_line.take().unwrap())
-                .chain(Cursor::new(recorded_url.request_headers.take().unwrap()))
-                .chain(&b"\r\n"[..])
-                .chain(request_payload.payload);
-
-            let record = WarcRecordBuilder::new()
-                .warc_type(WarcRecordType::Request)
-                .warc_date(Utc::now())
-                .warc_target_uri(recorded_url.uri.as_bytes())
-                // .warc_ip_address
-                .warc_payload_digest(format!("sha256:{:x}", &request_payload.sha256).as_bytes())
-                .content_type(b"application/http;msgtype=request")
-                .content_length(full_http_request_length)
-                .body(Box::new(full_http_request))
-                .build();
-            warc_writer.write_record(record)?;
-            info!("wrote to warc: {:?}", recorded_url.uri);
+        while let Some(recorded_url) = rx.next().await {
+            // info!("wrote to warc: {:?}", recorded_url.uri);
+            // 2023-01-12 22:49:29,093 8610 INFO WarcWriterProcessor(tid=n/a) warcprox.writerthread.WarcWriterProcessor._log(writerthread.py:135) 127.0.0.1 200 GET https://httpbin.org/get application/json size=485 sha1:12a3f9e7f0f8a92757dc4515fff52bf750a9855a response WARCPROX-20230113064929070-00000-nw73uzcl.warc.gz offset=348
+            let records = Vec::<WarcRecord>::from(recorded_url);
+            for record in records {
+                warc_writer.write_record(record)?;
+            }
         }
 
         Ok::<(), std::io::Error>(())
