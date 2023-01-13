@@ -37,16 +37,18 @@ pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
                     + recorded_url.response_headers.as_ref().unwrap().len() as u64
                     + 2
                     + recorded_url.response_payload.as_ref().unwrap().length;
+            let response_payload = recorded_url.response_payload.take().unwrap();
             let full_http_response = Cursor::new(recorded_url.response_status_line.take().unwrap())
                 .chain(Cursor::new(recorded_url.response_headers.take().unwrap()))
                 .chain(&b"\r\n"[..])
-                .chain(recorded_url.response_payload.take().unwrap().payload);
+                .chain(response_payload.payload);
 
             let record = WarcRecordBuilder::new()
                 .warc_type(WarcRecordType::Response)
                 .warc_date(Utc::now())
                 .warc_target_uri(recorded_url.uri.as_bytes())
                 // .warc_ip_address
+                .warc_payload_digest(format!("sha256:{:x}", &response_payload.sha256).as_bytes())
                 .content_type(b"application/http;msgtype=response")
                 .content_length(full_http_response_length)
                 .body(Box::new(full_http_response))
@@ -58,16 +60,18 @@ pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
                 + recorded_url.request_headers.as_ref().unwrap().len() as u64
                 + 2
                 + recorded_url.request_payload.as_ref().unwrap().length;
+            let request_payload = recorded_url.request_payload.take().unwrap();
             let full_http_request = Cursor::new(recorded_url.request_line.take().unwrap())
                 .chain(Cursor::new(recorded_url.request_headers.take().unwrap()))
                 .chain(&b"\r\n"[..])
-                .chain(recorded_url.request_payload.take().unwrap().payload);
+                .chain(request_payload.payload);
 
             let record = WarcRecordBuilder::new()
                 .warc_type(WarcRecordType::Request)
                 .warc_date(Utc::now())
                 .warc_target_uri(recorded_url.uri.as_bytes())
                 // .warc_ip_address
+                .warc_payload_digest(format!("sha256:{:x}", &request_payload.sha256).as_bytes())
                 .content_type(b"application/http;msgtype=request")
                 .content_length(full_http_request_length)
                 .body(Box::new(full_http_request))

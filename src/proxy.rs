@@ -147,7 +147,7 @@ fn response_status_line_as_bytes(parts: &response::Parts) -> Vec<u8> {
     )
 }
 
-fn request_status_line_as_bytes(parts: &request::Parts) -> Vec<u8> {
+fn request_line_as_bytes(parts: &request::Parts) -> Vec<u8> {
     Vec::from(
         format!(
             "{} {} {:?}\r\n",
@@ -188,7 +188,7 @@ impl HttpHandler for ProxyTransactionHandler {
             return Request::from_parts(parts, body).into();
         }
 
-        let request_line = Some(request_status_line_as_bytes(&parts));
+        let request_line = Some(request_line_as_bytes(&parts));
         self.recorded_url = Some(RecordedUrl {
             uri: parts.uri.to_string(),
             request_line,
