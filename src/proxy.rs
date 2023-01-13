@@ -1,3 +1,4 @@
+use chrono::Utc;
 use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, Stream};
 use hudsucker::async_trait::async_trait;
@@ -172,6 +173,7 @@ impl HttpHandler for ProxyTransactionHandler {
         let request_line = Some(request_line_as_bytes(&parts));
         self.recorded_url = Some(RecordedUrl {
             uri: parts.uri.to_string(),
+            timestamp: Utc::now(),
             request_line,
             request_headers: Some(headers_as_bytes(&parts.headers)),
             request_payload: None,
