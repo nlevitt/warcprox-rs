@@ -16,14 +16,19 @@ pub(crate) struct Payload {
 
 #[derive(Debug)]
 pub(crate) struct RecordedUrl {
-    uri: String,
-    timestamp: DateTime<Utc>,
-    request_line: Vec<u8>,
-    request_headers: Vec<u8>,
-    request_payload: Payload,
-    response_status_line: Vec<u8>,
-    response_headers: Vec<u8>,
-    response_payload: Payload,
+    pub(crate) timestamp: DateTime<Utc>,
+
+    pub(crate) uri: String,
+    pub(crate) status: u16,
+    pub(crate) method: String,
+    pub(crate) mimetype: Option<String>,
+
+    pub(crate) request_line: Vec<u8>,
+    pub(crate) request_headers: Vec<u8>,
+    pub(crate) request_payload: Payload,
+    pub(crate) response_status_line: Vec<u8>,
+    pub(crate) response_headers: Vec<u8>,
+    pub(crate) response_payload: Payload,
 }
 
 impl RecordedUrl {
@@ -91,9 +96,16 @@ fn headers_as_bytes(headers: &HeaderMap) -> Vec<u8> {
 pub(crate) struct RecordedUrlBuilder {
     uri: String,
     timestamp: DateTime<Utc>,
+
+    // request stuff
+    method: Option<String>,
     request_line: Option<Vec<u8>>,
     request_headers: Option<Vec<u8>>,
     request_payload: Option<Payload>,
+
+    // response stuff
+    status: Option<u16>,
+    mimetype: Option<String>,
     response_status_line: Option<Vec<u8>>,
     response_headers: Option<Vec<u8>>,
     response_payload: Option<Payload>,
@@ -102,11 +114,14 @@ pub(crate) struct RecordedUrlBuilder {
 impl RecordedUrlBuilder {
     pub(crate) fn new(uri: String) -> Self {
         Self {
-            uri,
             timestamp: Utc::now(),
+            uri,
+            method: None,
             request_line: None,
             request_headers: None,
             request_payload: None,
+            status: None,
+            mimetype: None,
             response_status_line: None,
             response_headers: None,
             response_payload: None,
@@ -114,6 +129,7 @@ impl RecordedUrlBuilder {
     }
 
     pub(crate) fn request_parts(mut self, parts: &request::Parts) -> Self {
+        self.method = Some(parts.method.to_string());
         self.request_line = Some(request_line_as_bytes(parts));
         self.request_headers = Some(headers_as_bytes(&parts.headers));
         self
@@ -125,8 +141,18 @@ impl RecordedUrlBuilder {
     }
 
     pub(crate) fn response_parts(mut self, parts: &response::Parts) -> Self {
+        if let Some(content_type) = parts.headers.get("content-type") {
+            if let Ok(content_type) = content_type.to_str() {
+                if let Some(semicolon_offset) = content_type.find(';') {
+                    self.mimetype = Some(String::from(&content_type[..semicolon_offset]));
+                } else {
+                    self.mimetype = Some(String::from(content_type));
+                }
+            }
+        }
         self.response_status_line = Some(response_status_line_as_bytes(parts));
         self.response_headers = Some(headers_as_bytes(&parts.headers));
+        self.status = Some(u16::from(parts.status));
         self
     }
 
@@ -135,13 +161,19 @@ impl RecordedUrlBuilder {
         self
     }
 
+    /// Build a RecordedUrl, consuming the builder. `request_parts()`, `request_payload()`,
+    /// `response_parts()` and `response_payload()` must have been called, or this method will
+    /// panic.
     pub(crate) fn build(mut self) -> RecordedUrl {
         RecordedUrl {
-            uri: self.uri,
             timestamp: self.timestamp,
+            uri: self.uri,
+            method: self.method.take().unwrap(),
             request_line: self.request_line.take().unwrap(),
             request_headers: self.request_headers.take().unwrap(),
             request_payload: self.request_payload.take().unwrap(),
+            status: self.status.take().unwrap(),
+            mimetype: self.mimetype.take(),
             response_status_line: self.response_status_line.take().unwrap(),
             response_headers: self.response_headers.take().unwrap(),
             response_payload: self.response_payload.take().unwrap(),
@@ -149,7 +181,6 @@ impl RecordedUrlBuilder {
     }
 }
 
-// fn response_record(mut recorded_url: &RecordedUrl) -> WarcRecord {
 fn response_record(
     uri: &String,
     timestamp: DateTime<Utc>,
@@ -179,7 +210,6 @@ fn response_record(
     record
 }
 
-// fn request_record(mut recorded_url: &RecordedUrl) -> WarcRecord {
 fn request_record(
     uri: &String,
     timestamp: DateTime<Utc>,

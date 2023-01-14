@@ -3,6 +3,7 @@ use crate::recorded_url::RecordedUrl;
 use futures::channel::mpsc::Receiver;
 use futures::StreamExt;
 use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom};
 use tracing::info;
 use warcio::{WarcRecord, WarcWriter};
 
@@ -19,14 +20,16 @@ pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
         // Content-Length: 485
         // WARC-Block-Digest: sha1:666cb28dbda701b12ddbcf779c735aa2e672ac23
         //
-        let f = OpenOptions::new()
+        let filename = if gzip {
+            "warcprox-rs.warc.gz"
+        } else {
+            "warcprox-rs.warc"
+        };
+        let mut f = OpenOptions::new()
             .create(true) // .create_new(true)
             .append(true) // .write(true)
-            .open(if gzip {
-                "warcprox-rs.warc.gz"
-            } else {
-                "warcprox-rs.warc"
-            })?;
+            .open(filename)?;
+        f.seek(SeekFrom::End(0)).unwrap();
         let mut warc_writer = WarcWriter::new(f, gzip);
 
         while let Some(recorded_url) = rx.next().await {
@@ -39,6 +42,22 @@ pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
             //                 recorded_url.method, recorded_url.url.decode('utf-8'),
             //                 recorded_url.mimetype, recorded_url.size, payload_digest,
             //                 type_, filename, offset)
+            info!(
+                "{} {} {} {} {} {} {} {} {}",
+                recorded_url.status,
+                recorded_url.method,
+                recorded_url.uri,
+                recorded_url
+                    .mimetype
+                    .as_ref()
+                    .or(Some(&String::from("-")))
+                    .unwrap(),
+                recorded_url.response_payload.length,
+                format!("sha256:{:x}", recorded_url.response_payload.sha256),
+                "response",
+                filename,
+                warc_writer.tell()
+            );
             let records = Vec::<WarcRecord>::from(recorded_url);
             //         self.logger.info(
             //                 '%s %s %s %s %s size=%s %s %s %s offset=%s',
@@ -46,7 +65,6 @@ pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
             //                 recorded_url.method, recorded_url.url.decode('utf-8'),
             //                 recorded_url.mimetype, recorded_url.size, payload_digest,
             //                 type_, filename, offset)
-            // info!("");
             for record in records {
                 warc_writer.write_record(record)?;
             }
