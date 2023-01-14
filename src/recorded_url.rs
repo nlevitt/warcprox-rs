@@ -1,4 +1,6 @@
 use chrono::{DateTime, Utc};
+use hudsucker::hyper::http::{request, response};
+use hudsucker::hyper::HeaderMap;
 use sha2::digest::Output;
 use sha2::Sha256;
 use std::io::{Cursor, Read};
@@ -14,19 +16,19 @@ pub(crate) struct Payload {
 
 #[derive(Debug)]
 pub(crate) struct RecordedUrl {
-    pub(crate) uri: String,
-    pub(crate) timestamp: DateTime<Utc>,
-    pub(crate) request_line: Option<Vec<u8>>,
-    pub(crate) request_headers: Option<Vec<u8>>,
-    pub(crate) request_payload: Option<Payload>,
-    pub(crate) response_status_line: Option<Vec<u8>>,
-    pub(crate) response_headers: Option<Vec<u8>>,
-    pub(crate) response_payload: Option<Payload>,
+    uri: String,
+    timestamp: DateTime<Utc>,
+    request_line: Vec<u8>,
+    request_headers: Vec<u8>,
+    request_payload: Payload,
+    response_status_line: Vec<u8>,
+    response_headers: Vec<u8>,
+    response_payload: Payload,
 }
 
 impl RecordedUrl {
     fn into_parts(
-        mut self,
+        self,
     ) -> (
         String,
         DateTime<Utc>,
@@ -40,13 +42,110 @@ impl RecordedUrl {
         (
             self.uri,
             self.timestamp,
-            self.request_line.take().unwrap(),
-            self.request_headers.take().unwrap(),
-            self.request_payload.take().unwrap(),
-            self.response_status_line.take().unwrap(),
-            self.response_headers.take().unwrap(),
-            self.response_payload.take().unwrap(),
+            self.request_line,
+            self.request_headers,
+            self.request_payload,
+            self.response_status_line,
+            self.response_headers,
+            self.response_payload,
         )
+    }
+}
+
+fn request_line_as_bytes(parts: &request::Parts) -> Vec<u8> {
+    Vec::from(
+        format!(
+            "{} {} {:?}\r\n",
+            parts.method,
+            parts.uri.path_and_query().unwrap(),
+            parts.version
+        )
+        .as_bytes(),
+    )
+}
+
+fn response_status_line_as_bytes(parts: &response::Parts) -> Vec<u8> {
+    Vec::from(
+        format!(
+            "{:?} {} {}\r\n",
+            parts.version,
+            parts.status.as_u16(),
+            parts.status.canonical_reason().unwrap()
+        )
+        .as_bytes(),
+    )
+}
+
+fn headers_as_bytes(headers: &HeaderMap) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for (name, value) in headers {
+        buf.extend_from_slice(name.as_str().as_bytes());
+        buf.extend_from_slice(b": ");
+        buf.extend_from_slice(value.as_bytes());
+        buf.extend_from_slice(b"\r\n");
+    }
+    buf
+}
+
+#[derive(Debug)]
+pub(crate) struct RecordedUrlBuilder {
+    uri: String,
+    timestamp: DateTime<Utc>,
+    request_line: Option<Vec<u8>>,
+    request_headers: Option<Vec<u8>>,
+    request_payload: Option<Payload>,
+    response_status_line: Option<Vec<u8>>,
+    response_headers: Option<Vec<u8>>,
+    response_payload: Option<Payload>,
+}
+
+impl RecordedUrlBuilder {
+    pub(crate) fn new(uri: String) -> Self {
+        Self {
+            uri,
+            timestamp: Utc::now(),
+            request_line: None,
+            request_headers: None,
+            request_payload: None,
+            response_status_line: None,
+            response_headers: None,
+            response_payload: None,
+        }
+    }
+
+    pub(crate) fn request_parts(mut self, parts: &request::Parts) -> Self {
+        self.request_line = Some(request_line_as_bytes(parts));
+        self.request_headers = Some(headers_as_bytes(&parts.headers));
+        self
+    }
+
+    pub(crate) fn request_payload(mut self, payload: Payload) -> Self {
+        self.request_payload = Some(payload);
+        self
+    }
+
+    pub(crate) fn response_parts(mut self, parts: &response::Parts) -> Self {
+        self.response_status_line = Some(response_status_line_as_bytes(parts));
+        self.response_headers = Some(headers_as_bytes(&parts.headers));
+        self
+    }
+
+    pub(crate) fn response_payload(mut self, payload: Payload) -> Self {
+        self.response_payload = Some(payload);
+        self
+    }
+
+    pub(crate) fn build(mut self) -> RecordedUrl {
+        RecordedUrl {
+            uri: self.uri,
+            timestamp: self.timestamp,
+            request_line: self.request_line.take().unwrap(),
+            request_headers: self.request_headers.take().unwrap(),
+            request_payload: self.request_payload.take().unwrap(),
+            response_status_line: self.response_status_line.take().unwrap(),
+            response_headers: self.response_headers.take().unwrap(),
+            response_payload: self.response_payload.take().unwrap(),
+        }
     }
 }
 

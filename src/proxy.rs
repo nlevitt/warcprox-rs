@@ -1,10 +1,8 @@
-use chrono::Utc;
 use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, Stream};
 use hudsucker::async_trait::async_trait;
 use hudsucker::hyper::body::Bytes;
-use hudsucker::hyper::http::{request, response};
-use hudsucker::hyper::{Body, Error, HeaderMap, Method, Request, Response};
+use hudsucker::hyper::{Body, Error, Method, Request, Response};
 use hudsucker::{HttpContext, HttpHandler, RequestOrResponse};
 use sha2::digest::Output;
 use sha2::{Digest, Sha256};
@@ -14,7 +12,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tempfile::SpooledTempFile;
 
-use crate::recorded_url::{Payload, RecordedUrl};
+use crate::recorded_url::{Payload, RecordedUrl, RecordedUrlBuilder};
 
 const SPOOLED_TEMPFILE_MAX_SIZE: usize = 512 * 1024;
 
@@ -77,7 +75,7 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for PayloadStream<T> {
 
 #[derive(Debug)]
 pub(crate) struct ProxyTransactionHandler {
-    pub(crate) recorded_url: Option<RecordedUrl>,
+    pub(crate) recorded_url_builder: Option<RecordedUrlBuilder>,
     pub(crate) recorded_url_tx: Option<mpsc::Sender<RecordedUrl>>,
     request_payload_rx: Option<oneshot::Receiver<Payload>>,
     is_connect: bool,
@@ -87,7 +85,7 @@ impl ProxyTransactionHandler {
     pub(crate) fn new(recorded_url_tx: mpsc::Sender<RecordedUrl>) -> Self {
         Self {
             recorded_url_tx: Some(recorded_url_tx),
-            recorded_url: None,
+            recorded_url_builder: None,
             request_payload_rx: None,
             is_connect: false,
         }
@@ -98,7 +96,7 @@ impl Clone for ProxyTransactionHandler {
     fn clone(&self) -> Self {
         ProxyTransactionHandler {
             // FIXME not kosher but hudsucker ought to be creating a new struct rather than cloning
-            recorded_url: None,
+            recorded_url_builder: None,
             recorded_url_tx: self.recorded_url_tx.clone(),
             request_payload_rx: None,
             is_connect: false,
@@ -106,53 +104,20 @@ impl Clone for ProxyTransactionHandler {
     }
 }
 
-fn headers_as_bytes(headers: &HeaderMap) -> Vec<u8> {
-    let mut buf = Vec::new();
-    for (name, value) in headers {
-        buf.extend_from_slice(name.as_str().as_bytes());
-        buf.extend_from_slice(b": ");
-        buf.extend_from_slice(value.as_bytes());
-        buf.extend_from_slice(b"\r\n");
-    }
-    buf
-}
-
-fn response_status_line_as_bytes(parts: &response::Parts) -> Vec<u8> {
-    Vec::from(
-        format!(
-            "{:?} {} {}\r\n",
-            parts.version,
-            parts.status.as_u16(),
-            parts.status.canonical_reason().unwrap()
-        )
-        .as_bytes(),
-    )
-}
-
-fn request_line_as_bytes(parts: &request::Parts) -> Vec<u8> {
-    Vec::from(
-        format!(
-            "{} {} {:?}\r\n",
-            parts.method,
-            parts.uri.path_and_query().unwrap(),
-            parts.version
-        )
-        .as_bytes(),
-    )
-}
-
 fn await_payloads_and_queue_postfetch(
-    mut recorded_url: RecordedUrl,
+    recorded_url_builder: RecordedUrlBuilder,
     request_payload_rx: oneshot::Receiver<Payload>,
     response_payload_rx: oneshot::Receiver<Payload>,
     mut recorded_url_tx: mpsc::Sender<RecordedUrl>,
 ) {
     tokio::spawn(async move {
         let request_payload = request_payload_rx.await.unwrap();
-        recorded_url.request_payload = Some(request_payload);
+        let response_payload = response_payload_rx.await.unwrap();
 
-        let payload = response_payload_rx.await.unwrap();
-        recorded_url.response_payload = Some(payload);
+        let recorded_url = recorded_url_builder
+            .request_payload(request_payload)
+            .response_payload(response_payload)
+            .build();
         recorded_url_tx.send(recorded_url).await.unwrap();
     });
 }
@@ -170,18 +135,8 @@ impl HttpHandler for ProxyTransactionHandler {
             return Request::from_parts(parts, body).into();
         }
 
-        let request_line = Some(request_line_as_bytes(&parts));
-        self.recorded_url = Some(RecordedUrl {
-            uri: parts.uri.to_string(),
-            timestamp: Utc::now(),
-            request_line,
-            request_headers: Some(headers_as_bytes(&parts.headers)),
-            request_payload: None,
-            response_status_line: None,
-            response_headers: None,
-            response_payload: None,
-        });
-
+        self.recorded_url_builder =
+            Some(RecordedUrlBuilder::new(parts.uri.to_string()).request_parts(&parts));
         let (request_payload_tx, request_payload_rx) = oneshot::channel::<Payload>();
         let body = Body::wrap_stream(PayloadStream::wrap(body, request_payload_tx));
         self.request_payload_rx = Some(request_payload_rx);
@@ -198,16 +153,14 @@ impl HttpHandler for ProxyTransactionHandler {
         }
 
         let (parts, body) = response.into_parts();
-
-        let mut recorded_url = self.recorded_url.take().unwrap();
-        recorded_url.response_status_line = Some(response_status_line_as_bytes(&parts));
-        recorded_url.response_headers = Some(headers_as_bytes(&parts.headers));
+        let mut recorded_url_builder = self.recorded_url_builder.take().unwrap();
+        recorded_url_builder = recorded_url_builder.response_parts(&parts);
 
         let (response_payload_tx, response_payload_rx) = oneshot::channel::<Payload>();
         let body = Body::wrap_stream(PayloadStream::wrap(body, response_payload_tx));
 
         await_payloads_and_queue_postfetch(
-            recorded_url,
+            recorded_url_builder,
             self.request_payload_rx.take().unwrap(),
             response_payload_rx,
             self.recorded_url_tx.take().unwrap(),
