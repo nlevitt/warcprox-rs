@@ -136,7 +136,7 @@ impl HttpHandler for ProxyTransactionHandler {
         }
 
         self.recorded_url_builder =
-            Some(RecordedUrlBuilder::new(parts.uri.to_string()).request_parts(&parts));
+            Some(RecordedUrl::builder(parts.uri.to_string()).request_parts(&parts));
         let (request_payload_tx, request_payload_rx) = oneshot::channel::<Payload>();
         let body = Body::wrap_stream(PayloadStream::wrap(body, request_payload_tx));
         self.request_payload_rx = Some(request_payload_rx);

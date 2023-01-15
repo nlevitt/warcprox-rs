@@ -32,6 +32,22 @@ pub(crate) struct RecordedUrl {
 }
 
 impl RecordedUrl {
+    pub(crate) fn builder(uri: String) -> RecordedUrlBuilder {
+        RecordedUrlBuilder {
+            timestamp: Utc::now(),
+            uri,
+            method: None,
+            request_line: None,
+            request_headers: None,
+            request_payload: None,
+            status: None,
+            mimetype: None,
+            response_status_line: None,
+            response_headers: None,
+            response_payload: None,
+        }
+    }
+
     fn into_parts(
         self,
     ) -> (
@@ -112,22 +128,6 @@ pub(crate) struct RecordedUrlBuilder {
 }
 
 impl RecordedUrlBuilder {
-    pub(crate) fn new(uri: String) -> Self {
-        Self {
-            timestamp: Utc::now(),
-            uri,
-            method: None,
-            request_line: None,
-            request_headers: None,
-            request_payload: None,
-            status: None,
-            mimetype: None,
-            response_status_line: None,
-            response_headers: None,
-            response_payload: None,
-        }
-    }
-
     pub(crate) fn request_parts(mut self, parts: &request::Parts) -> Self {
         self.method = Some(parts.method.to_string());
         self.request_line = Some(request_line_as_bytes(parts));
