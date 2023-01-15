@@ -18,6 +18,7 @@ tempfile = "3.3.0"
 chrono = "0.4.23"
 warcio = { git = "https://github.com/nlevitt/warcio-rs" }
 clap = { version = "4.0.32", features = ["derive"] }
+rustls-pemfile = "1.0.1"
 
 [patch.crates-io]
 hudsucker = { path = "../hudsucker" }

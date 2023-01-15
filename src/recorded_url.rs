@@ -5,7 +5,7 @@ use sha2::digest::Output;
 use sha2::Sha256;
 use std::io::{Cursor, Read};
 use tempfile::SpooledTempFile;
-use warcio::{WarcRecord, WarcRecordBuilder, WarcRecordType};
+use warcio::{WarcRecord, WarcRecordType};
 
 #[derive(Debug)]
 pub(crate) struct Payload {
@@ -197,7 +197,7 @@ fn response_record(
         .chain(&b"\r\n"[..])
         .chain(response_payload.payload);
 
-    let record = WarcRecordBuilder::new()
+    let record = WarcRecord::builder()
         .warc_type(WarcRecordType::Response)
         .warc_date(timestamp)
         .warc_target_uri(uri.as_bytes())
@@ -224,7 +224,7 @@ fn request_record(
         .chain(&b"\r\n"[..])
         .chain(request_payload.payload);
 
-    let record = WarcRecordBuilder::new()
+    let record = WarcRecord::builder()
         .warc_type(WarcRecordType::Request)
         .warc_date(timestamp)
         .warc_target_uri(uri.as_bytes())

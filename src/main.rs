@@ -26,6 +26,16 @@ struct Args {
     #[arg(short = 'b', long, default_value = "localhost")]
     address: String,
 
+    // -c CACERT, --cacert CACERT
+    // CA certificate file; if file does not exist, it will be created (default: ./ML-nlevitt-C02DL15LMD6R-warcprox-ca.pem)
+    #[arg(
+        short = 'c',
+        long = "cacert",
+        default_value = "./warcprox-rs-ca.pem",
+        help = "CA certificate file. If it does not exist, it will be created"
+    )]
+    ca_cert: String,
+
     #[arg(
         short = 'z',
         long,
@@ -36,7 +46,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
@@ -50,7 +60,7 @@ async fn main() {
 
     spawn_postfetch(rx, args.gzip);
 
-    let ca = ca::build_ca();
+    let ca = ca::certauth(args.ca_cert)?;
     let proxy = Proxy::builder()
         .with_addr(addr)
         .with_rustls_client()
@@ -62,4 +72,6 @@ async fn main() {
     if let Err(e) = proxy.start(shutdown_signal()).await {
         error!("proxy failed to start: {}", e);
     }
+
+    Ok(())
 }
