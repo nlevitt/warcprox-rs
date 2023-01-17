@@ -1,0 +1,20 @@
+name: tests
+
+on:
+- push
+- pull_request
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: build
+      run: cargo build --verbose
+    - name: test
+      run: cargo test --verbose
+    - name: check formatting
+      run: cargo fmt --all --check
