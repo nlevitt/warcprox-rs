@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     spawn_postfetch(rx, args.gzip);
 
-    let ca = ca::certauth(args.ca_cert)?;
+    let ca = ca::certauth(&args.ca_cert)?;
     let proxy = Proxy::builder()
         .with_addr(addr)
         .with_rustls_client()
