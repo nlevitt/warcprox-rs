@@ -20,9 +20,9 @@ warcio = { git = "https://github.com/nlevitt/warcio-rs" }
 clap = { version = "4.0.32", features = ["derive"] }
 rustls-pemfile = "1.0.1"
 
-[patch.crates-io]
-hudsucker = { path = "../hudsucker" }
-hyper = { path = "../hyper" }
-
-[patch."https://github.com/nlevitt/warcio-rs"]
-warcio = { path = "../warcio-rs" }
+# [patch.crates-io]
+# hudsucker = { path = "../hudsucker" }
+# hyper = { path = "../hyper" }
+#
+# [patch."https://github.com/nlevitt/warcio-rs"]
+# warcio = { path = "../warcio-rs" }
