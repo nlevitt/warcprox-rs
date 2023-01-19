@@ -26,8 +26,6 @@ struct Args {
     #[arg(short = 'b', long, default_value = "localhost")]
     address: String,
 
-    // -c CACERT, --cacert CACERT
-    // CA certificate file; if file does not exist, it will be created (default: ./ML-nlevitt-C02DL15LMD6R-warcprox-ca.pem)
     #[arg(
         short = 'c',
         long = "cacert",
@@ -68,9 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_http_handler(ProxyTransactionHandler::new(tx))
         .build();
 
-    info!("proxy listening at {}", addr);
+    info!("warcprox listening at {}", addr);
     if let Err(e) = proxy.start(shutdown_signal()).await {
-        error!("proxy failed to start: {}", e);
+        error!("warcprox failed to start: {}", e);
     }
 
     Ok(())

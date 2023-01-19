@@ -269,3 +269,127 @@ impl From<RecordedUrl> for Vec<WarcRecord> {
         records
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::recorded_url::{Payload, RecordedUrl};
+    use chrono::Utc;
+    use hudsucker::hyper::http::{request, response};
+    use hudsucker::hyper::{Body, Request, Response};
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom};
+    use std::str::from_utf8;
+    use tempfile::SpooledTempFile;
+
+    fn empty_payload() -> Payload {
+        Payload {
+            payload: SpooledTempFile::new(4),
+            sha256: Sha256::new().finalize(),
+            length: 0,
+        }
+    }
+
+    fn is_empty_payload(payload: &mut Payload) -> bool {
+        let mut buf = Vec::<u8>::new();
+        payload.payload.seek(SeekFrom::Start(0)).unwrap();
+        payload.payload.read_to_end(&mut buf).unwrap();
+
+        buf == b""
+            && payload.sha256.as_slice()
+                == [
+                    227, 176, 196, 66, 152, 252, 28, 20, 154, 251, 244, 200, 153, 111, 185, 36, 39,
+                    174, 65, 228, 100, 155, 147, 76, 164, 149, 153, 27, 120, 82, 184, 85,
+                ]
+            && payload.length == 0
+    }
+
+    fn empty_response_parts() -> response::Parts {
+        Response::builder()
+            .body(Body::from(Vec::<u8>::new()))
+            .unwrap()
+            .into_parts()
+            .0
+    }
+
+    fn empty_request_parts() -> request::Parts {
+        Request::builder()
+            .body(Body::from(Vec::<u8>::new()))
+            .unwrap()
+            .into_parts()
+            .0
+    }
+
+    #[test]
+    fn test_recorded_url_builder() {
+        let t0 = Utc::now();
+        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(&empty_request_parts())
+            .request_payload(empty_payload())
+            .response_parts(&empty_response_parts())
+            .response_payload(empty_payload())
+            .build();
+        let t1 = Utc::now();
+
+        let (
+            uri,
+            timestamp,
+            request_line,
+            request_headers,
+            mut request_payload,
+            response_status_line,
+            response_headers,
+            mut response_payload,
+        ) = recorded_url.into_parts();
+        assert_eq!(uri, String::from("https://example.com/"));
+        assert!(timestamp >= t0 && timestamp <= t1);
+        assert_eq!(from_utf8(&request_line).unwrap(), "GET / HTTP/1.1\r\n");
+        assert_eq!(from_utf8(&request_headers).unwrap(), "");
+        assert!(is_empty_payload(&mut request_payload));
+        assert_eq!(
+            from_utf8(&response_status_line).unwrap(),
+            "HTTP/1.1 200 OK\r\n"
+        );
+        assert_eq!(from_utf8(&response_headers).unwrap(), "");
+        assert!(is_empty_payload(&mut response_payload));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_recorded_url_builder_panics_without_request_parts() {
+        RecordedUrl::builder(String::from("https://example.com/"))
+            .request_payload(empty_payload())
+            .response_parts(&empty_response_parts())
+            .response_payload(empty_payload())
+            .build();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_recorded_url_builder_panics_without_request_payload() {
+        RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(&empty_request_parts())
+            .response_parts(&empty_response_parts())
+            .response_payload(empty_payload())
+            .build();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_recorded_url_builder_panics_without_response_parts() {
+        RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(&empty_request_parts())
+            .request_payload(empty_payload())
+            .response_payload(empty_payload())
+            .build();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_recorded_url_builder_panics_without_response_payload() {
+        RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(&empty_request_parts())
+            .request_payload(empty_payload())
+            .response_parts(&empty_response_parts())
+            .build();
+    }
+}
