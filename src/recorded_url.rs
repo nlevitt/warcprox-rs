@@ -91,7 +91,11 @@ fn response_status_line_as_bytes(parts: &response::Parts) -> Vec<u8> {
             "{:?} {} {}\r\n",
             parts.version,
             parts.status.as_u16(),
-            parts.status.canonical_reason().unwrap()
+            parts
+                .status
+                .canonical_reason()
+                .or(Some("No Known Reason"))
+                .unwrap()
         )
         .as_bytes(),
     )
@@ -273,13 +277,14 @@ impl From<RecordedUrl> for Vec<WarcRecord> {
 #[cfg(test)]
 mod tests {
     use crate::recorded_url::{Payload, RecordedUrl};
-    use chrono::Utc;
+    use chrono::{SecondsFormat, Utc};
     use hudsucker::hyper::http::{request, response};
-    use hudsucker::hyper::{Body, Request, Response};
+    use hudsucker::hyper::{Body, Request, Response, Version};
     use sha2::{Digest, Sha256};
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{Cursor, Read, Seek, SeekFrom, Write};
     use std::str::from_utf8;
     use tempfile::SpooledTempFile;
+    use warcio::{WarcRecord, WarcWriter};
 
     fn empty_payload() -> Payload {
         Payload {
@@ -303,6 +308,21 @@ mod tests {
             && payload.length == 0
     }
 
+    fn build_payload(content: &[u8]) -> Payload {
+        let mut f = SpooledTempFile::new(500000);
+        let mut sha = Sha256::new();
+        f.write_all(content).unwrap();
+        sha.update(content);
+        let length = f.seek(SeekFrom::End(0)).unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+
+        Payload {
+            payload: f,
+            sha256: sha.finalize(),
+            length,
+        }
+    }
+
     fn empty_response_parts() -> response::Parts {
         Response::builder()
             .body(Body::from(Vec::<u8>::new()))
@@ -320,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recorded_url_builder() {
+    fn test_recorded_url_into_parts() {
         let t0 = Utc::now();
         let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
             .request_parts(&empty_request_parts())
@@ -351,6 +371,302 @@ mod tests {
         );
         assert_eq!(from_utf8(&response_headers).unwrap(), "");
         assert!(is_empty_payload(&mut response_payload));
+    }
+
+    #[test]
+    fn test_recorded_url_mimetype() {
+        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(&empty_request_parts())
+            .request_payload(empty_payload())
+            .response_parts(
+                &Response::builder()
+                    .header("Content-type", "text/plain; charset=utf-8")
+                    .body(Body::from(Vec::<u8>::new()))
+                    .unwrap()
+                    .into_parts()
+                    .0,
+            )
+            .response_payload(empty_payload())
+            .build();
+        assert!(recorded_url.mimetype.is_some());
+        assert_eq!(recorded_url.mimetype.unwrap(), "text/plain");
+    }
+
+    #[test]
+    fn test_recorded_url_request_line() {
+        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(
+                &Request::builder()
+                    .uri("/foo/bar?baz=quux")
+                    .method("PATCH")
+                    .version(Version::HTTP_10)
+                    .body(Body::from(Vec::<u8>::new()))
+                    .unwrap()
+                    .into_parts()
+                    .0,
+            )
+            .request_payload(empty_payload())
+            .response_parts(&empty_response_parts())
+            .response_payload(empty_payload())
+            .build();
+        assert_eq!(
+            from_utf8(&recorded_url.request_line).unwrap(),
+            "PATCH /foo/bar?baz=quux HTTP/1.0\r\n"
+        )
+    }
+
+    #[test]
+    fn test_recorded_url_request_headers() {
+        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(
+                &Request::builder()
+                    .header("b", "1")
+                    .header("Duplicate", "2")
+                    .header("a", "3")
+                    .header("Duplicate", "4")
+                    .header("mUsTaRD", "3")
+                    .body(Body::from(Vec::<u8>::new()))
+                    .unwrap()
+                    .into_parts()
+                    .0,
+            )
+            .request_payload(empty_payload())
+            .response_parts(&empty_response_parts())
+            .response_payload(empty_payload())
+            .build();
+        assert_eq!(
+            from_utf8(&recorded_url.request_headers).unwrap(),
+            concat!(
+                "b: 1\r\n",
+                "duplicate: 2\r\n",
+                "duplicate: 4\r\n",
+                "a: 3\r\n",
+                "mustard: 3\r\n"
+            )
+        )
+    }
+
+    #[test]
+    fn test_recorded_url_response_standard_status() {
+        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(&empty_request_parts())
+            .request_payload(empty_payload())
+            .response_parts(
+                &Response::builder()
+                    .status(418)
+                    .body(Body::from(Vec::<u8>::new()))
+                    .unwrap()
+                    .into_parts()
+                    .0,
+            )
+            .response_payload(empty_payload())
+            .build();
+        assert_eq!(recorded_url.status, 418);
+        assert_eq!(
+            from_utf8(&recorded_url.response_status_line).unwrap(),
+            "HTTP/1.1 418 I'm a teapot\r\n"
+        );
+    }
+
+    #[test]
+    fn test_recorded_url_response_unknown_status() {
+        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(&empty_request_parts())
+            .request_payload(empty_payload())
+            .response_parts(
+                &Response::builder()
+                    // .status("420 Chill bro")
+                    .status(420)
+                    .body(Body::from(Vec::<u8>::new()))
+                    .unwrap()
+                    .into_parts()
+                    .0,
+            )
+            .response_payload(empty_payload())
+            .build();
+        assert_eq!(recorded_url.status, 420);
+        assert_eq!(
+            from_utf8(&recorded_url.response_status_line).unwrap(),
+            "HTTP/1.1 420 No Known Reason\r\n"
+        );
+    }
+
+    #[test]
+    fn test_recorded_url_response_headers() {
+        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(&empty_request_parts())
+            .request_payload(empty_payload())
+            .response_parts(
+                &Response::builder()
+                    .header("b", "1")
+                    .header("Duplicate", "2")
+                    .header("a", "3")
+                    .header("Duplicate", "4")
+                    .header("mUsTaRD", "3")
+                    .body(Body::from(Vec::<u8>::new()))
+                    .unwrap()
+                    .into_parts()
+                    .0,
+            )
+            .response_payload(empty_payload())
+            .build();
+        assert_eq!(
+            from_utf8(&recorded_url.response_headers).unwrap(),
+            concat!(
+                "b: 1\r\n",
+                "duplicate: 2\r\n",
+                "duplicate: 4\r\n",
+                "a: 3\r\n",
+                "mustard: 3\r\n"
+            )
+        )
+    }
+
+    #[test]
+    fn test_recorded_url_request_payload() {
+        const CONTENT: &[u8; 29] = b"lorem ipsum shmipsum flipsum\n";
+        let mut recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(&empty_request_parts())
+            .request_payload(build_payload(CONTENT))
+            .response_parts(&empty_response_parts())
+            .response_payload(empty_payload())
+            .build();
+
+        let mut buf: Vec<u8> = Vec::new();
+        recorded_url
+            .request_payload
+            .payload
+            .read_to_end(&mut buf)
+            .unwrap();
+        assert_eq!(&buf, CONTENT);
+        assert_eq!(recorded_url.request_payload.length, CONTENT.len() as u64);
+        assert_eq!(
+            recorded_url.request_payload.sha256.as_slice(),
+            [
+                246, 94, 186, 154, 79, 82, 252, 61, 167, 250, 82, 168, 20, 253, 238, 106, 67, 189,
+                113, 181, 176, 115, 30, 22, 154, 215, 237, 184, 111, 66, 248, 111
+            ]
+        );
+    }
+
+    #[test]
+    fn test_recorded_url_response_payload() {
+        const CONTENT: &[u8; 29] = b"lorem ipsum shmipsum flipsum\n";
+        let mut recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(&empty_request_parts())
+            .request_payload(empty_payload())
+            .response_parts(&empty_response_parts())
+            .response_payload(build_payload(CONTENT))
+            .build();
+
+        let mut buf: Vec<u8> = Vec::new();
+        recorded_url
+            .response_payload
+            .payload
+            .read_to_end(&mut buf)
+            .unwrap();
+        assert_eq!(buf, CONTENT);
+        assert_eq!(recorded_url.response_payload.length, CONTENT.len() as u64);
+        assert_eq!(
+            recorded_url.response_payload.sha256.as_slice(),
+            [
+                246, 94, 186, 154, 79, 82, 252, 61, 167, 250, 82, 168, 20, 253, 238, 106, 67, 189,
+                113, 181, 176, 115, 30, 22, 154, 215, 237, 184, 111, 66, 248, 111
+            ]
+        );
+    }
+
+    #[test]
+    fn test_recorded_url_timestamp() {
+        let t0 = Utc::now();
+        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(&empty_request_parts())
+            .request_payload(empty_payload())
+            .response_parts(&empty_response_parts())
+            .response_payload(empty_payload())
+            .build();
+        let t1 = Utc::now();
+        assert!(recorded_url.timestamp >= t0 && recorded_url.timestamp <= t1);
+    }
+
+    #[test]
+    fn test_warc_record_from_recorded_url() {
+        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+            .request_parts(
+                &Request::builder()
+                    .method("POST")
+                    .version(Version::HTTP_3)
+                    .header("Howdly", "Doodly dood")
+                    .uri("/a/b?c=d&e=f")
+                    .body(Body::from(Vec::<u8>::new())) // not used
+                    .unwrap()
+                    .into_parts()
+                    .0,
+            )
+            .request_payload(build_payload(b"I'm your request payload"))
+            .response_parts(
+                &Response::builder()
+                    .version(Version::HTTP_11)
+                    .status(418)
+                    .header("Requestly", "Headlier")
+                    .body(Body::from(Vec::<u8>::new())) // not used
+                    .unwrap()
+                    .into_parts()
+                    .0,
+            )
+            .response_payload(build_payload(b"I'm your response payload"))
+            .build();
+
+        let warc_date = recorded_url
+            .timestamp
+            .to_rfc3339_opts(SecondsFormat::Micros, true);
+
+        let mut warc_writer = WarcWriter::new(Cursor::new(Vec::<u8>::new()), false);
+        let records = Vec::<WarcRecord>::from(recorded_url);
+        let (record_id_0, record_id_1) =
+            (records[0].record_id.clone(), records[1].record_id.clone());
+        for record in records {
+            warc_writer.write_record(record).unwrap();
+        }
+        assert_eq!(
+            from_utf8(&warc_writer.into_inner().into_inner()).unwrap(),
+            format!(
+                concat!(
+                    "WARC/1.1\r\n",
+                    "WARC-Record-ID: <{}>\r\n",
+                    "WARC-Type: response\r\n",
+                    "WARC-Date: {}\r\n",
+                    "WARC-Target-URI: https://example.com/\r\n",
+                    "WARC-Payload-Digest: sha256:ac0a325a80368e33a0b20f15a9c540a3471b5f6e4d73215b3b963c68b696df11\r\n",
+                    "Content-Type: application/http;msgtype=response\r\n",
+                    "Content-Length: 75\r\n",
+                    "\r\n",
+                    "HTTP/1.1 418 I'm a teapot\r\n",
+                    "requestly: Headlier\r\n",
+                    "\r\n",
+                    "I'm your response payload\r\n",
+                    "\r\n",
+                    "WARC/1.1\r\n",
+                    "WARC-Record-ID: <{}>\r\n",
+                    "WARC-Type: request\r\n",
+                    "WARC-Date: {}\r\n",
+                    "WARC-Target-URI: https://example.com/\r\n",
+                    "WARC-Payload-Digest: sha256:e41aa34eadbd35db1fe0ffabd4750136630de9ac9d66b5a42c71f2518ead5c80\r\n",
+                    "Content-Type: application/http;msgtype=request\r\n",
+                    "Content-Length: 75\r\n",
+                    "\r\n",
+                    "POST /a/b?c=d&e=f HTTP/3.0\r\n",
+                    "howdly: Doodly dood\r\n",
+                    "\r\n",
+                    "I'm your request payload\r\n",
+                    "\r\n",
+                ),
+                record_id_0,
+                warc_date,
+                record_id_1,
+                warc_date
+            )
+        );
     }
 
     #[test]
