@@ -1,3 +1,6 @@
+use crate::postfetch::spawn_postfetch;
+use crate::proxy_client::proxy_client;
+use crate::recorded_url::RecordedUrl;
 use clap::Parser;
 use futures::channel::mpsc;
 use hudsucker::Proxy;
@@ -5,12 +8,10 @@ use proxy::ProxyTransactionHandler;
 use std::net::ToSocketAddrs as _;
 use tracing::{error, info};
 
-use crate::postfetch::spawn_postfetch;
-use crate::recorded_url::RecordedUrl;
-
 mod ca;
 mod postfetch;
 mod proxy;
+mod proxy_client;
 mod recorded_url;
 
 async fn shutdown_signal() {
@@ -61,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ca = ca::certauth(&args.ca_cert)?;
     let proxy = Proxy::builder()
         .with_addr(addr)
-        .with_rustls_client()
+        .with_client(proxy_client())
         .with_ca(ca)
         .with_http_handler(ProxyTransactionHandler::new(tx))
         .build();

@@ -2,13 +2,14 @@ use hudsucker::{certificate_authority::RcgenAuthority, rustls};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, DnValue, IsCa,
 };
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::path::Path;
 use tracing::info;
 
-pub fn create_ca(path: &str) -> Result<RcgenAuthority, Box<dyn std::error::Error>> {
-    info!("creating CA cert {}", path);
+pub fn create_ca(path: &Path) -> Result<RcgenAuthority, Box<dyn std::error::Error>> {
+    info!("creating CA cert {:?}", path);
     let mut ca_cert_params = CertificateParams::default();
     ca_cert_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     ca_cert_params.distinguished_name = DistinguishedName::new();
@@ -21,6 +22,7 @@ pub fn create_ca(path: &str) -> Result<RcgenAuthority, Box<dyn std::error::Error
     let mut f = File::create(path)?;
     f.write(ca_cert.get_key_pair().serialize_pem().as_bytes())?;
     f.write(ca_cert.serialize_pem()?.as_bytes())?;
+    f.flush().unwrap();
 
     let private_key = rustls::PrivateKey(ca_cert.get_key_pair().serialize_der());
     let ca_cert = rustls::Certificate(ca_cert.serialize_der().unwrap());
@@ -30,8 +32,8 @@ pub fn create_ca(path: &str) -> Result<RcgenAuthority, Box<dyn std::error::Error
     Ok(ca)
 }
 
-fn load_ca(path: &str) -> Result<RcgenAuthority, Box<dyn std::error::Error>> {
-    info!("loading CA cert {}", path);
+fn load_ca(path: &Path) -> Result<RcgenAuthority, Box<dyn std::error::Error>> {
+    info!("loading CA cert {:?}", path);
     let mut f = BufReader::new(File::open(&path)?);
     let mut key: Option<Vec<u8>> = None;
     let mut cert: Option<Vec<u8>> = None;
@@ -65,10 +67,10 @@ fn load_ca(path: &str) -> Result<RcgenAuthority, Box<dyn std::error::Error>> {
         }
     }
     if key.is_none() {
-        panic!("private key not found in {}", path)
+        panic!("private key not found in {:?}", path)
     }
     if cert.is_none() {
-        panic!("certificate not found in {}", path)
+        panic!("certificate not found in {:?}", path)
     }
     let ca = RcgenAuthority::new(
         rustls::PrivateKey(key.take().unwrap()),
@@ -76,14 +78,17 @@ fn load_ca(path: &str) -> Result<RcgenAuthority, Box<dyn std::error::Error>> {
         10_000,
     )
     .expect(&format!(
-        "failed to set up certificate authority from key and cert loaded from {}",
+        "failed to set up certificate authority from key and cert loaded from {:?}",
         path
     ));
     Ok(ca)
 }
 
-pub fn certauth(path: &str) -> Result<RcgenAuthority, Box<dyn std::error::Error>> {
-    if Path::new(&path).exists() {
+pub fn certauth<S: AsRef<OsStr> + ?Sized>(
+    path: &S,
+) -> Result<RcgenAuthority, Box<dyn std::error::Error>> {
+    let path = Path::new(&path);
+    if path.exists() {
         load_ca(path)
     } else {
         create_ca(path)

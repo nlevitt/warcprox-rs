@@ -11,6 +11,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tempfile::SpooledTempFile;
+use tracing::debug;
 
 use crate::recorded_url::{Payload, RecordedUrl, RecordedUrlBuilder};
 
@@ -127,9 +128,10 @@ impl HttpHandler for ProxyTransactionHandler {
     async fn handle_request(
         &mut self,
         _ctx: &HttpContext,
-        req: Request<Body>,
+        request: Request<Body>,
     ) -> RequestOrResponse {
-        let (parts, body) = req.into_parts();
+        debug!("request={:?}", request);
+        let (parts, body) = request.into_parts();
         if parts.method == Method::CONNECT {
             self.is_connect = true;
             return Request::from_parts(parts, body).into();
@@ -148,6 +150,7 @@ impl HttpHandler for ProxyTransactionHandler {
         _ctx: &HttpContext,
         response: Response<Body>,
     ) -> Response<Body> {
+        debug!("response={:?}", response);
         if self.is_connect {
             return response;
         }
@@ -167,5 +170,249 @@ impl HttpHandler for ProxyTransactionHandler {
         );
 
         Response::from_parts(parts, body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ca::certauth;
+    use crate::proxy::ProxyTransactionHandler;
+    use crate::proxy_client::proxy_client;
+    use crate::recorded_url::RecordedUrl;
+    use chrono::Utc;
+    use futures::channel::{mpsc, oneshot};
+    use futures::StreamExt;
+    use hudsucker::certificate_authority::CertificateAuthority;
+    use hudsucker::hyper;
+    use hudsucker::hyper::server::conn::AddrStream;
+    use hudsucker::hyper::service::{make_service_fn, service_fn};
+    use hudsucker::Proxy;
+    use std::convert::Infallible;
+    use std::fs::File;
+    use std::io::{BufReader, Seek, SeekFrom};
+    use std::net::{SocketAddr, TcpListener, ToSocketAddrs as _};
+    use std::str::from_utf8;
+    use tempfile::TempDir;
+    use tls_listener::TlsListener;
+
+    fn start_http_server() -> (SocketAddr, oneshot::Sender<()>) {
+        let make_svc = make_service_fn(|_conn: &AddrStream| async {
+            Ok::<_, Infallible>(service_fn(|_: hyper::Request<hyper::Body>| async {
+                Ok::<_, Infallible>(hyper::Response::new(hyper::Body::from(
+                    "http server response body\n",
+                )))
+            }))
+        });
+
+        let listener =
+            TcpListener::bind("localhost:0".to_socket_addrs().unwrap().next().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (stop_server_tx, stop_server_rx) = oneshot::channel::<()>();
+
+        let server = hyper::Server::from_tcp(listener).unwrap();
+        let server = server.serve(make_svc);
+        let server =
+            server.with_graceful_shutdown(async { stop_server_rx.await.unwrap_or_default() });
+        tokio::spawn(server);
+
+        (addr, stop_server_tx)
+    }
+
+    async fn start_https_server(
+    ) -> Result<(SocketAddr, oneshot::Sender<()>), Box<dyn std::error::Error>> {
+        let mut path = TempDir::new().unwrap().into_path();
+        path.push("test_https_server.pem");
+        let ca = certauth(&path).unwrap();
+
+        let make_svc = make_service_fn(|_| async {
+            Ok::<_, Infallible>(service_fn(|_req: hyper::Request<hyper::Body>| async {
+                Ok::<_, Infallible>(hyper::Response::new(hyper::Body::from(
+                    "https server response body\n",
+                )))
+            }))
+        });
+
+        let listener =
+            TcpListener::bind("localhost:0".to_socket_addrs().unwrap().next().unwrap()).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let acceptor: tokio_rustls::TlsAcceptor = ca
+            .gen_server_config(&"localhost".parse().unwrap())
+            .await
+            .into();
+        let listener = TlsListener::new(acceptor, tokio::net::TcpListener::from_std(listener)?);
+
+        let (stop_server_tx, stop_server_rx) = oneshot::channel::<()>();
+
+        tokio::spawn(
+            hyper::Server::builder(listener)
+                .serve(make_svc)
+                .with_graceful_shutdown(async { stop_server_rx.await.unwrap_or_default() }),
+        );
+
+        Ok((addr, stop_server_tx))
+    }
+
+    struct ProxyInfo {
+        addr: SocketAddr,
+        // ca_cert: reqwest::Certificate,
+        recorded_url_rx: mpsc::Receiver<RecordedUrl>,
+        stop_proxy_tx: oneshot::Sender<()>,
+    }
+
+    fn start_proxy() -> ProxyInfo {
+        let mut path = TempDir::new().unwrap().into_path();
+        path.push("test_proxy.pem");
+        let tcp_listener =
+            TcpListener::bind("localhost:0".to_socket_addrs().unwrap().next().unwrap()).unwrap();
+        let addr = tcp_listener.local_addr().unwrap();
+        let ca = certauth(&path).unwrap();
+
+        let _ca_cert = {
+            let mut f = BufReader::new(File::open(&path).unwrap());
+            let der = &rustls_pemfile::certs(&mut f).unwrap()[0];
+            reqwest::Certificate::from_der(der).unwrap()
+        };
+
+        let (recorded_url_tx, recorded_url_rx) = mpsc::channel::<RecordedUrl>(500);
+        let proxy = Proxy::builder()
+            .with_listener(tcp_listener)
+            .with_client(proxy_client())
+            .with_ca(ca)
+            .with_http_handler(ProxyTransactionHandler::new(recorded_url_tx))
+            .build();
+
+        let (stop_proxy_tx, stop_proxy_rx) = oneshot::channel::<()>();
+        tokio::spawn(proxy.start(async {
+            stop_proxy_rx.await.unwrap();
+            println!("proxy stopped");
+        }));
+
+        ProxyInfo {
+            addr,
+            // ca_cert,
+            recorded_url_rx,
+            stop_proxy_tx,
+        }
+    }
+
+    fn client(proxy_info: &ProxyInfo) -> reqwest::Client {
+        let proxy_url = format!("http://{:?}", proxy_info.addr);
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(proxy_url).unwrap())
+            // .add_root_certificate(proxy_info.ca_cert) // FIXME not working
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_proxy_http_url() {
+        let mut proxy_info = start_proxy();
+        let client = client(&proxy_info);
+
+        let (addr, _stop_server_tx) = start_http_server();
+        let url = format!("http://{:?}/", addr);
+
+        let t0 = Utc::now();
+        let _response = client.get(&url).send().await.unwrap();
+        let t1 = Utc::now();
+
+        let mut recorded_url = proxy_info.recorded_url_rx.next().await.unwrap();
+        assert_eq!(recorded_url.uri, url);
+        assert!(recorded_url.timestamp >= t0 && recorded_url.timestamp <= t1);
+        assert_eq!(
+            from_utf8(&recorded_url.request_line).unwrap(),
+            "GET / HTTP/1.1\r\n"
+        );
+        let request_payload_str = {
+            recorded_url
+                .request_payload
+                .payload
+                .seek(SeekFrom::Start(0))
+                .unwrap();
+            std::io::read_to_string(recorded_url.request_payload.payload).unwrap()
+        };
+        assert_eq!(request_payload_str, "");
+        assert_eq!(recorded_url.request_payload.length, 0);
+        assert_eq!(
+            format!("sha256:{:x}", &recorded_url.request_payload.sha256),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        assert_eq!(recorded_url.status, 200);
+        let response_payload_str = {
+            recorded_url
+                .response_payload
+                .payload
+                .seek(SeekFrom::Start(0))
+                .unwrap();
+            std::io::read_to_string(recorded_url.response_payload.payload).unwrap()
+        };
+        assert_eq!(response_payload_str, "http server response body\n");
+        assert_eq!(
+            from_utf8(&recorded_url.response_status_line).unwrap(),
+            "HTTP/1.1 200 OK\r\n"
+        );
+
+        assert!(proxy_info.recorded_url_rx.try_next().is_err());
+
+        proxy_info.stop_proxy_tx.send(()).unwrap();
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_proxy_https_url() {
+        let mut proxy_info = start_proxy();
+        let client = client(&proxy_info);
+
+        let (addr, _stop_server_tx) = start_https_server().await.unwrap();
+        // let url = format!("https://{:?}/", addr); // results in "Illegal SNI hostname received"
+        let url = format!("https://localhost:{}/", addr.port());
+
+        let t0 = Utc::now();
+        let _response = client.get(&url).send().await.unwrap();
+        let t1 = Utc::now();
+
+        let mut recorded_url = proxy_info.recorded_url_rx.next().await.unwrap();
+        assert_eq!(recorded_url.uri, url);
+        assert!(recorded_url.timestamp >= t0 && recorded_url.timestamp <= t1);
+        assert_eq!(
+            from_utf8(&recorded_url.request_line).unwrap(),
+            "GET / HTTP/1.1\r\n"
+        );
+        let request_payload_str = {
+            recorded_url
+                .request_payload
+                .payload
+                .seek(SeekFrom::Start(0))
+                .unwrap();
+            std::io::read_to_string(recorded_url.request_payload.payload).unwrap()
+        };
+        assert_eq!(request_payload_str, "");
+        assert_eq!(recorded_url.request_payload.length, 0);
+        assert_eq!(
+            format!("sha256:{:x}", &recorded_url.request_payload.sha256),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        assert_eq!(recorded_url.status, 200);
+        let response_payload_str = {
+            recorded_url
+                .response_payload
+                .payload
+                .seek(SeekFrom::Start(0))
+                .unwrap();
+            std::io::read_to_string(recorded_url.response_payload.payload).unwrap()
+        };
+        assert_eq!(response_payload_str, "https server response body\n");
+        assert_eq!(
+            from_utf8(&recorded_url.response_status_line).unwrap(),
+            "HTTP/1.1 200 OK\r\n"
+        );
+
+        assert!(proxy_info.recorded_url_rx.try_next().is_err());
+
+        proxy_info.stop_proxy_tx.send(()).unwrap();
     }
 }
