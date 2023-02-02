@@ -1,8 +1,7 @@
 use hudsucker::hyper::client::HttpConnector;
 use hudsucker::hyper::Client;
-use hudsucker::rustls;
-use hudsucker::rustls::client::{ServerCertVerified, ServerCertVerifier};
-use hudsucker::rustls::{Certificate, Error, ServerName};
+use rustls::client::{ServerCertVerified, ServerCertVerifier};
+use rustls::{Certificate, Error, ServerName};
 use std::sync::Arc;
 use std::time::SystemTime;
 
