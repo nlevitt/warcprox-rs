@@ -1,18 +1,6 @@
-use crate::postfetch::spawn_postfetch;
-use crate::proxy_client::proxy_client;
-use crate::recorded_url::RecordedUrl;
 use clap::Parser;
-use futures::channel::mpsc;
-use hudsucker::Proxy;
-use proxy::ProxyTransactionHandler;
-use std::net::ToSocketAddrs as _;
-use tracing::{error, info};
-
-mod ca;
-mod postfetch;
-mod proxy;
-mod proxy_client;
-mod recorded_url;
+use tracing::info;
+use warcprox_rs::WarcProxy;
 
 async fn shutdown_signal() {
     tokio::signal::ctrl_c().await.unwrap();
@@ -49,28 +37,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
-    let addr = format!("{}:{}", args.address, args.port)
-        .to_socket_addrs()
-        .unwrap()
-        .next()
-        .unwrap();
+    let address = format!("{}:{}", args.address, args.port);
+    let warcproxy = WarcProxy::new(&address, args.gzip, &args.ca_cert)?;
 
-    let (tx, rx) = mpsc::channel::<RecordedUrl>(500);
-
-    spawn_postfetch(rx, args.gzip);
-
-    let ca = ca::certauth(&args.ca_cert)?;
-    let proxy = Proxy::builder()
-        .with_addr(addr)
-        .with_client(proxy_client())
-        .with_ca(ca)
-        .with_http_handler(ProxyTransactionHandler::new(tx))
-        .build();
-
-    info!("warcprox listening at {}", addr);
-    if let Err(e) = proxy.start(shutdown_signal()).await {
-        error!("warcprox failed to start: {}", e);
-    }
+    info!("warcprox listening at {}", address);
+    warcproxy.start(shutdown_signal()).await?;
 
     Ok(())
 }
