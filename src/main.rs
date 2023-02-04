@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let warcproxy = WarcProxy::new(&address, args.gzip, &args.ca_cert)?;
 
     info!("warcprox listening at {}", address);
-    warcproxy.start(shutdown_signal()).await?;
+    warcproxy.run_until_shutdown(shutdown_signal()).await?;
 
     Ok(())
 }

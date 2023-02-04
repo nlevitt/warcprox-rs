@@ -175,6 +175,7 @@ impl HttpHandler for ProxyTransactionHandler {
 
 #[cfg(test)]
 mod tests {
+    extern crate test_common;
     use crate::ca::certauth;
     use crate::proxy::ProxyTransactionHandler;
     use crate::proxy_client::proxy_client;
@@ -182,77 +183,13 @@ mod tests {
     use chrono::Utc;
     use futures::channel::{mpsc, oneshot};
     use futures::StreamExt;
-    use hudsucker::certificate_authority::CertificateAuthority;
-    use hudsucker::hyper;
-    use hudsucker::hyper::server::conn::AddrStream;
-    use hudsucker::hyper::service::{make_service_fn, service_fn};
     use hudsucker::Proxy;
-    use std::convert::Infallible;
     use std::fs::File;
     use std::io::{BufReader, Seek, SeekFrom};
     use std::net::{SocketAddr, TcpListener, ToSocketAddrs as _};
     use std::str::from_utf8;
     use tempfile::TempDir;
-    use tls_listener::TlsListener;
-
-    fn start_http_server() -> (SocketAddr, oneshot::Sender<()>) {
-        let make_svc = make_service_fn(|_conn: &AddrStream| async {
-            Ok::<_, Infallible>(service_fn(|_: hyper::Request<hyper::Body>| async {
-                Ok::<_, Infallible>(hyper::Response::new(hyper::Body::from(
-                    "http server response body\n",
-                )))
-            }))
-        });
-
-        let listener =
-            TcpListener::bind("localhost:0".to_socket_addrs().unwrap().next().unwrap()).unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let (stop_server_tx, stop_server_rx) = oneshot::channel::<()>();
-
-        let server = hyper::Server::from_tcp(listener).unwrap();
-        let server = server.serve(make_svc);
-        let server =
-            server.with_graceful_shutdown(async { stop_server_rx.await.unwrap_or_default() });
-        tokio::spawn(server);
-
-        (addr, stop_server_tx)
-    }
-
-    async fn start_https_server(
-    ) -> Result<(SocketAddr, oneshot::Sender<()>), Box<dyn std::error::Error>> {
-        let mut path = TempDir::new().unwrap().into_path();
-        path.push("test_https_server.pem");
-        let ca = certauth(&path).unwrap();
-
-        let make_svc = make_service_fn(|_| async {
-            Ok::<_, Infallible>(service_fn(|_req: hyper::Request<hyper::Body>| async {
-                Ok::<_, Infallible>(hyper::Response::new(hyper::Body::from(
-                    "https server response body\n",
-                )))
-            }))
-        });
-
-        let listener =
-            TcpListener::bind("localhost:0".to_socket_addrs().unwrap().next().unwrap()).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let addr = listener.local_addr().unwrap();
-        let acceptor: tokio_rustls::TlsAcceptor = ca
-            .gen_server_config(&"localhost".parse().unwrap())
-            .await
-            .into();
-        let listener = TlsListener::new(acceptor, tokio::net::TcpListener::from_std(listener)?);
-
-        let (stop_server_tx, stop_server_rx) = oneshot::channel::<()>();
-
-        tokio::spawn(
-            hyper::Server::builder(listener)
-                .serve(make_svc)
-                .with_graceful_shutdown(async { stop_server_rx.await.unwrap_or_default() }),
-        );
-
-        Ok((addr, stop_server_tx))
-    }
+    use test_common::{http_client, start_http_server, start_https_server};
 
     struct ProxyInfo {
         addr: SocketAddr,
@@ -297,20 +234,10 @@ mod tests {
         }
     }
 
-    fn client(proxy_info: &ProxyInfo) -> reqwest::Client {
-        let proxy_url = format!("http://{:?}", proxy_info.addr);
-        reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(proxy_url).unwrap())
-            // .add_root_certificate(proxy_info.ca_cert) // FIXME not working
-            .danger_accept_invalid_certs(true)
-            .build()
-            .unwrap()
-    }
-
     #[tokio::test]
     async fn test_proxy_http_url() {
         let mut proxy_info = start_proxy();
-        let client = client(&proxy_info);
+        let client = http_client(proxy_info.addr);
 
         let (addr, _stop_server_tx) = start_http_server();
         let url = format!("http://{:?}/", addr);
@@ -364,7 +291,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_proxy_https_url() {
         let mut proxy_info = start_proxy();
-        let client = client(&proxy_info);
+        let client = http_client(proxy_info.addr);
 
         let (addr, _stop_server_tx) = start_https_server().await.unwrap();
         // let url = format!("https://{:?}/", addr); // results in "Illegal SNI hostname received"

@@ -38,7 +38,7 @@ fn load_ca(path: &Path) -> Result<RcgenAuthority, Box<dyn std::error::Error>> {
     let mut key: Option<Vec<u8>> = None;
     let mut cert: Option<Vec<u8>> = None;
     for item in std::iter::from_fn(|| rustls_pemfile::read_one(&mut f).transpose()) {
-        match item.unwrap() {
+        match item.expect(&format!("{:?}", path)) {
             rustls_pemfile::Item::X509Certificate(c) => {
                 cert = Some(c);
                 if key.is_some() {

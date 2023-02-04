@@ -9,13 +9,14 @@ use hudsucker::hyper::client::HttpConnector;
 use hudsucker::{NoopHandler, Proxy};
 use hyper_rustls::HttpsConnector;
 use std::future::Future;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 
 pub struct WarcProxy {
     proxy:
         Proxy<HttpsConnector<HttpConnector>, RcgenAuthority, ProxyTransactionHandler, NoopHandler>,
     recorded_url_rx: mpsc::Receiver<RecordedUrl>,
     gzip: bool,
+    pub addr: SocketAddr,
 }
 
 impl WarcProxy {
@@ -26,9 +27,11 @@ impl WarcProxy {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let ca = ca::certauth(&ca_cert_path)?;
         let (recorded_url_tx, recorded_url_rx) = mpsc::channel::<RecordedUrl>(500);
+        let tcp_listener = TcpListener::bind(address)?;
         Ok(Self {
+            addr: tcp_listener.local_addr()?,
             proxy: Proxy::builder()
-                .with_listener(TcpListener::bind(address)?)
+                .with_listener(tcp_listener)
                 .with_client(proxy_client())
                 .with_ca(ca)
                 .with_http_handler(ProxyTransactionHandler::new(recorded_url_tx))
@@ -38,7 +41,7 @@ impl WarcProxy {
         })
     }
 
-    pub async fn start<F: Future<Output = ()>>(
+    pub async fn run_until_shutdown<F: Future<Output = ()>>(
         self,
         shutdown_signal: F,
     ) -> Result<(), hudsucker::Error> {
