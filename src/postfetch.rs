@@ -3,7 +3,7 @@ use crate::recorded_url::RecordedUrl;
 use futures::channel::mpsc::Receiver;
 use futures::StreamExt;
 use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use tracing::info;
 use warcio::{WarcRecord, WarcWriter};
 
@@ -38,7 +38,7 @@ pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
                 filename,
                 warc_writer.tell()
             );
-            let records = Vec::<WarcRecord>::from(recorded_url);
+            let records = Vec::<WarcRecord<Box<dyn Read>>>::from(recorded_url);
             for record in records {
                 warc_writer.write_record(record)?;
             }

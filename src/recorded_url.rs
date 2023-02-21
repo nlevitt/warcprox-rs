@@ -11,7 +11,7 @@ use warcio::{WarcRecord, WarcRecordType};
 pub(crate) struct Payload {
     pub(crate) sha256: Output<Sha256>,
     pub(crate) payload: SpooledTempFile,
-    pub(crate) length: u64,
+    pub(crate) length: usize,
 }
 
 #[derive(Debug)]
@@ -191,17 +191,18 @@ fn response_record(
     response_status_line: Vec<u8>,
     response_headers: Vec<u8>,
     response_payload: Payload,
-) -> WarcRecord {
-    let full_http_response_length: u64 = response_status_line.len() as u64
-        + response_headers.len() as u64
-        + 2
-        + response_payload.length;
-    let full_http_response = Cursor::new(response_status_line)
-        .chain(Cursor::new(response_headers))
-        .chain(&b"\r\n"[..])
-        .chain(response_payload.payload);
+) -> WarcRecord<Box<dyn Read>> {
+    let full_http_response_length: usize =
+        response_status_line.len() + response_headers.len() + 2 + response_payload.length;
+    let full_http_response: Box<dyn Read> = Box::new(
+        Cursor::new(response_status_line)
+            .chain(Cursor::new(response_headers))
+            .chain(&b"\r\n"[..])
+            .chain(response_payload.payload),
+    );
 
     let record = WarcRecord::builder()
+        .generate_record_id()
         .warc_type(WarcRecordType::Response)
         .warc_date(timestamp)
         .warc_target_uri(uri.as_bytes())
@@ -209,7 +210,7 @@ fn response_record(
         .warc_payload_digest(format!("sha256:{:x}", &response_payload.sha256).as_bytes())
         .content_type(b"application/http;msgtype=response")
         .content_length(full_http_response_length)
-        .body(Box::new(full_http_response))
+        .body(full_http_response)
         .build();
     record
 }
@@ -220,15 +221,18 @@ fn request_record(
     request_line: Vec<u8>,
     request_headers: Vec<u8>,
     request_payload: Payload,
-) -> WarcRecord {
-    let full_http_request_length: u64 =
-        request_line.len() as u64 + request_headers.len() as u64 + 2 + request_payload.length;
-    let full_http_request = Cursor::new(request_line)
-        .chain(Cursor::new(request_headers))
-        .chain(&b"\r\n"[..])
-        .chain(request_payload.payload);
+) -> WarcRecord<Box<dyn Read>> {
+    let full_http_request_length: usize =
+        request_line.len() + request_headers.len() + 2 + request_payload.length;
+    let full_http_request: Box<dyn Read> = Box::new(
+        Cursor::new(request_line)
+            .chain(Cursor::new(request_headers))
+            .chain(&b"\r\n"[..])
+            .chain(request_payload.payload),
+    );
 
     let record = WarcRecord::builder()
+        .generate_record_id()
         .warc_type(WarcRecordType::Request)
         .warc_date(timestamp)
         .warc_target_uri(uri.as_bytes())
@@ -236,12 +240,12 @@ fn request_record(
         .warc_payload_digest(format!("sha256:{:x}", &request_payload.sha256).as_bytes())
         .content_type(b"application/http;msgtype=request")
         .content_length(full_http_request_length)
-        .body(Box::new(full_http_request))
+        .body(full_http_request)
         .build();
     record
 }
 
-impl From<RecordedUrl> for Vec<WarcRecord> {
+impl From<RecordedUrl> for Vec<WarcRecord<Box<dyn Read>>> {
     fn from(recorded_url: RecordedUrl) -> Self {
         let (
             uri,
@@ -254,7 +258,7 @@ impl From<RecordedUrl> for Vec<WarcRecord> {
             response_payload,
         ) = recorded_url.into_parts();
 
-        let mut records = Vec::new();
+        let mut records: Vec<WarcRecord<Box<dyn Read>>> = Vec::new();
         records.push(response_record(
             &uri,
             timestamp,
@@ -313,7 +317,7 @@ mod tests {
         let mut sha = Sha256::new();
         f.write_all(content).unwrap();
         sha.update(content);
-        let length = f.seek(SeekFrom::End(0)).unwrap();
+        let length = f.seek(SeekFrom::End(0)).unwrap() as usize;
         f.seek(SeekFrom::Start(0)).unwrap();
 
         Payload {
@@ -539,7 +543,7 @@ mod tests {
             .read_to_end(&mut buf)
             .unwrap();
         assert_eq!(&buf, CONTENT);
-        assert_eq!(recorded_url.request_payload.length, CONTENT.len() as u64);
+        assert_eq!(recorded_url.request_payload.length, CONTENT.len());
         assert_eq!(
             recorded_url.request_payload.sha256.as_slice(),
             [
@@ -566,7 +570,7 @@ mod tests {
             .read_to_end(&mut buf)
             .unwrap();
         assert_eq!(buf, CONTENT);
-        assert_eq!(recorded_url.response_payload.length, CONTENT.len() as u64);
+        assert_eq!(recorded_url.response_payload.length, CONTENT.len());
         assert_eq!(
             recorded_url.response_payload.sha256.as_slice(),
             [
@@ -622,7 +626,7 @@ mod tests {
             .to_rfc3339_opts(SecondsFormat::Micros, true);
 
         let mut warc_writer = WarcWriter::new(Cursor::new(Vec::<u8>::new()), false);
-        let records = Vec::<WarcRecord>::from(recorded_url);
+        let records = Vec::<WarcRecord<Box<dyn Read>>>::from(recorded_url);
         let (record_id_0, record_id_1) =
             (records[0].record_id.clone(), records[1].record_id.clone());
         for record in records {

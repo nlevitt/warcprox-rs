@@ -59,7 +59,7 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for PayloadStream<T> {
     fn drop(&mut self) {
         let mut payload: SpooledTempFile = self.recorder.take().unwrap();
         let sha256: Output<Sha256> = self.sha256.take().unwrap().finalize();
-        let length = payload.seek(SeekFrom::End(0)).unwrap();
+        let length = payload.seek(SeekFrom::End(0)).unwrap() as usize;
         payload.seek(SeekFrom::Start(0)).unwrap();
 
         self.tx
