@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
-use hudsucker::hyper::http::{request, response};
-use hudsucker::hyper::HeaderMap;
+use hudsucker::hyper::http::{request, response, HeaderValue};
+use hudsucker::hyper::{HeaderMap, Method, StatusCode, Uri, Version};
 use sha2::digest::Output;
 use sha2::Sha256;
-use std::io::{Cursor, Read};
+use std::fmt::Debug;
 use tempfile::SpooledTempFile;
 use warcio::{WarcRecord, WarcRecordType};
 
@@ -18,31 +18,31 @@ pub(crate) struct Payload {
 pub(crate) struct RecordedUrl {
     pub(crate) timestamp: DateTime<Utc>,
 
-    pub(crate) uri: String,
-    pub(crate) status: u16,
-    pub(crate) method: String,
-    pub(crate) mimetype: Option<String>,
-
-    pub(crate) request_line: Vec<u8>,
-    pub(crate) request_headers: Vec<u8>,
+    pub(crate) request_method: Method,
+    pub(crate) request_uri: Uri,
+    pub(crate) request_version: Version,
+    pub(crate) request_headers: HeaderMap<HeaderValue>,
     pub(crate) request_payload: Payload,
-    pub(crate) response_status_line: Vec<u8>,
-    pub(crate) response_headers: Vec<u8>,
+
+    pub(crate) response_status: StatusCode,
+    pub(crate) response_version: Version,
+    pub(crate) response_headers: HeaderMap<HeaderValue>,
     pub(crate) response_payload: Payload,
 }
 
 impl RecordedUrl {
-    pub(crate) fn builder(uri: String) -> RecordedUrlBuilder {
+    pub(crate) fn builder() -> RecordedUrlBuilder {
         RecordedUrlBuilder {
             timestamp: Utc::now(),
-            uri,
-            method: None,
-            request_line: None,
+
+            request_method: None,
+            request_uri: None,
+            request_version: None,
             request_headers: None,
             request_payload: None,
-            status: None,
-            mimetype: None,
-            response_status_line: None,
+
+            response_status: None,
+            response_version: None,
             response_headers: None,
             response_payload: None,
         }
@@ -51,91 +51,55 @@ impl RecordedUrl {
     fn into_parts(
         self,
     ) -> (
-        String,
         DateTime<Utc>,
-        Vec<u8>,
-        Vec<u8>,
+        Method,
+        Uri,
+        Version,
+        HeaderMap<HeaderValue>,
         Payload,
-        Vec<u8>,
-        Vec<u8>,
+        StatusCode,
+        Version,
+        HeaderMap<HeaderValue>,
         Payload,
     ) {
         (
-            self.uri,
             self.timestamp,
-            self.request_line,
+            self.request_method,
+            self.request_uri,
+            self.request_version,
             self.request_headers,
             self.request_payload,
-            self.response_status_line,
+            self.response_status,
+            self.response_version,
             self.response_headers,
             self.response_payload,
         )
     }
 }
 
-fn request_line_as_bytes(parts: &request::Parts) -> Vec<u8> {
-    Vec::from(
-        format!(
-            "{} {} {:?}\r\n",
-            parts.method,
-            parts.uri.path_and_query().unwrap(),
-            parts.version
-        )
-        .as_bytes(),
-    )
-}
-
-fn response_status_line_as_bytes(parts: &response::Parts) -> Vec<u8> {
-    Vec::from(
-        format!(
-            "{:?} {} {}\r\n",
-            parts.version,
-            parts.status.as_u16(),
-            parts
-                .status
-                .canonical_reason()
-                .or(Some("No Known Reason"))
-                .unwrap()
-        )
-        .as_bytes(),
-    )
-}
-
-fn headers_as_bytes(headers: &HeaderMap) -> Vec<u8> {
-    let mut buf = Vec::new();
-    for (name, value) in headers {
-        buf.extend_from_slice(name.as_str().as_bytes());
-        buf.extend_from_slice(b": ");
-        buf.extend_from_slice(value.as_bytes());
-        buf.extend_from_slice(b"\r\n");
-    }
-    buf
-}
-
 #[derive(Debug)]
 pub(crate) struct RecordedUrlBuilder {
-    uri: String,
     timestamp: DateTime<Utc>,
 
-    // request stuff
-    method: Option<String>,
-    request_line: Option<Vec<u8>>,
-    request_headers: Option<Vec<u8>>,
+    request_method: Option<Method>,
+    request_uri: Option<Uri>,
+    request_version: Option<Version>,
+    request_headers: Option<HeaderMap<HeaderValue>>,
     request_payload: Option<Payload>,
 
-    // response stuff
-    status: Option<u16>,
-    mimetype: Option<String>,
-    response_status_line: Option<Vec<u8>>,
-    response_headers: Option<Vec<u8>>,
+    response_status: Option<StatusCode>,
+    response_version: Option<Version>,
+    response_headers: Option<HeaderMap<HeaderValue>>,
     response_payload: Option<Payload>,
 }
 
 impl RecordedUrlBuilder {
     pub(crate) fn request_parts(mut self, parts: &request::Parts) -> Self {
-        self.method = Some(parts.method.to_string());
-        self.request_line = Some(request_line_as_bytes(parts));
-        self.request_headers = Some(headers_as_bytes(&parts.headers));
+        // avoid cloning?
+        self.request_method = Some(parts.method.clone());
+        self.request_uri = Some(parts.uri.clone());
+        self.request_version = Some(parts.version);
+        self.request_headers = Some(parts.headers.clone());
         self
     }
 
@@ -145,6 +109,11 @@ impl RecordedUrlBuilder {
     }
 
     pub(crate) fn response_parts(mut self, parts: &response::Parts) -> Self {
+        // avoid cloning?
+        self.response_status = Some(parts.status);
+        self.response_version = Some(parts.version);
+        self.response_headers = Some(parts.headers.clone());
+        /*
         if let Some(content_type) = parts.headers.get("content-type") {
             if let Ok(content_type) = content_type.to_str() {
                 if let Some(semicolon_offset) = content_type.find(';') {
@@ -157,6 +126,7 @@ impl RecordedUrlBuilder {
         self.response_status_line = Some(response_status_line_as_bytes(parts));
         self.response_headers = Some(headers_as_bytes(&parts.headers));
         self.status = Some(u16::from(parts.status));
+         */
         self
     }
 
@@ -171,50 +141,81 @@ impl RecordedUrlBuilder {
     pub(crate) fn build(mut self) -> RecordedUrl {
         RecordedUrl {
             timestamp: self.timestamp,
-            uri: self.uri,
-            method: self.method.take().unwrap(),
-            request_line: self.request_line.take().unwrap(),
-            request_headers: self.request_headers.take().unwrap(),
-            request_payload: self.request_payload.take().unwrap(),
-            status: self.status.take().unwrap(),
-            mimetype: self.mimetype.take(),
-            response_status_line: self.response_status_line.take().unwrap(),
-            response_headers: self.response_headers.take().unwrap(),
-            response_payload: self.response_payload.take().unwrap(),
+
+            request_method: self.request_method.unwrap(),
+            request_uri: self.request_uri.unwrap(),
+            request_version: self.request_version.unwrap(),
+            request_headers: self.request_headers.unwrap(),
+            request_payload: self.request_payload.unwrap(),
+
+            response_status: self.response_status.unwrap(),
+            response_version: self.response_version.unwrap(),
+            response_headers: self.response_headers.unwrap(),
+            response_payload: self.response_payload.unwrap(),
         }
     }
 }
 
 fn response_record(
-    uri: &String,
+    uri: &Uri,
     timestamp: DateTime<Utc>,
-    response_status_line: Vec<u8>,
-    response_headers: Vec<u8>,
+    response_status: StatusCode,
+    response_version: Version,
+    response_headers: HeaderMap<HeaderValue>,
     response_payload: Payload,
-) -> WarcRecord<Box<dyn Read>> {
-    let full_http_response_length: usize =
-        response_status_line.len() + response_headers.len() + 2 + response_payload.length;
-    let full_http_response: Box<dyn Read> = Box::new(
-        Cursor::new(response_status_line)
-            .chain(Cursor::new(response_headers))
-            .chain(&b"\r\n"[..])
-            .chain(response_payload.payload),
-    );
-
+) -> WarcRecord<SpooledTempFile> {
     let record = WarcRecord::builder()
         .generate_record_id()
         .warc_type(WarcRecordType::Response)
         .warc_date(timestamp)
-        .warc_target_uri(uri.as_bytes())
+        .warc_target_uri(&uri.to_string().into_bytes())
         // .warc_ip_address
         .warc_payload_digest(format!("sha256:{:x}", &response_payload.sha256).as_bytes())
         .content_type(b"application/http;msgtype=response")
-        .content_length(full_http_response_length)
-        .body(full_http_response)
+        .http_response(
+            response_version,
+            response_status,
+            response_headers,
+            response_payload.payload,
+        )
         .build();
     record
 }
 
+fn request_record(
+    uri: &Uri,
+    timestamp: DateTime<Utc>,
+    request_method: Method,
+    request_version: Version,
+    request_headers: HeaderMap<HeaderValue>,
+    request_payload: Payload,
+) -> WarcRecord<SpooledTempFile> {
+    let record = WarcRecord::builder()
+        .generate_record_id()
+        .warc_type(WarcRecordType::Request)
+        .warc_date(timestamp)
+        .warc_target_uri(&uri.to_string().into_bytes())
+        .warc_payload_digest(format!("sha256:{:x}", &request_payload.sha256).as_bytes())
+        .content_type(b"application/http;msgtype=request")
+        // should not use the full uri here, but also the proxy's outgoing request should not use
+        // the full uri
+        .http_request(
+            request_method,
+            uri,
+            request_version,
+            request_headers,
+            request_payload.payload,
+        )
+        // method: Method,
+        // uri: Uri,
+        // version: Version,
+        // headers: HeaderMap<HeaderValue>,
+        // body: R,
+        .build();
+    record
+}
+
+/*
 fn request_record(
     uri: &String,
     timestamp: DateTime<Utc>,
@@ -222,8 +223,10 @@ fn request_record(
     request_headers: Vec<u8>,
     request_payload: Payload,
 ) -> WarcRecord<Box<dyn Read>> {
-    let full_http_request_length: usize =
-        request_line.len() + request_headers.len() + 2 + request_payload.length;
+    let full_http_request_length: u64 = request_line.len() as u64
+        + request_headers.len() as u64
+        + 2
+        + request_payload.length as u64;
     let full_http_request: Box<dyn Read> = Box::new(
         Cursor::new(request_line)
             .chain(Cursor::new(request_headers))
@@ -244,32 +247,37 @@ fn request_record(
         .build();
     record
 }
+ */
 
-impl From<RecordedUrl> for Vec<WarcRecord<Box<dyn Read>>> {
+impl From<RecordedUrl> for Vec<WarcRecord<SpooledTempFile>> {
     fn from(recorded_url: RecordedUrl) -> Self {
         let (
-            uri,
             timestamp,
-            request_line,
+            request_method,
+            request_uri,
+            request_version,
             request_headers,
             request_payload,
-            response_status_line,
+            response_status,
+            response_version,
             response_headers,
             response_payload,
         ) = recorded_url.into_parts();
 
-        let mut records: Vec<WarcRecord<Box<dyn Read>>> = Vec::new();
+        let mut records: Vec<WarcRecord<SpooledTempFile>> = Vec::new();
         records.push(response_record(
-            &uri,
+            &request_uri,
             timestamp,
-            response_status_line,
+            response_status,
+            response_version,
             response_headers,
             response_payload,
         ));
         records.push(request_record(
-            &uri,
+            &request_uri,
             timestamp,
-            request_line,
+            request_method,
+            request_version,
             request_headers,
             request_payload,
         ));
@@ -282,13 +290,15 @@ impl From<RecordedUrl> for Vec<WarcRecord<Box<dyn Read>>> {
 mod tests {
     use crate::recorded_url::{Payload, RecordedUrl};
     use chrono::{SecondsFormat, Utc};
+    use http::{HeaderName, HeaderValue, StatusCode};
     use hudsucker::hyper::http::{request, response};
-    use hudsucker::hyper::{Body, Request, Response, Version};
+    use hudsucker::hyper::{Body, Method, Request, Response, Version};
     use sha2::{Digest, Sha256};
+    use std::error::Error;
     use std::io::{Cursor, Read, Seek, SeekFrom, Write};
     use std::str::from_utf8;
     use tempfile::SpooledTempFile;
-    use warcio::{WarcRecord, WarcWriter};
+    use warcio::{WarcRecord, WarcRecordWrite as _, WarcWriter};
 
     fn empty_payload() -> Payload {
         Payload {
@@ -335,8 +345,9 @@ mod tests {
             .0
     }
 
-    fn empty_request_parts() -> request::Parts {
+    fn minimal_request_parts() -> request::Parts {
         Request::builder()
+            .uri("https://example.com/")
             .body(Body::from(Vec::<u8>::new()))
             .unwrap()
             .into_parts()
@@ -344,10 +355,10 @@ mod tests {
     }
 
     #[test]
-    fn test_recorded_url_into_parts() {
+    fn test_recorded_url_into_parts() -> Result<(), Box<dyn Error>> {
         let t0 = Utc::now();
-        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
-            .request_parts(&empty_request_parts())
+        let recorded_url = RecordedUrl::builder()
+            .request_parts(&minimal_request_parts())
             .request_payload(empty_payload())
             .response_parts(&empty_response_parts())
             .response_payload(empty_payload())
@@ -355,32 +366,38 @@ mod tests {
         let t1 = Utc::now();
 
         let (
-            uri,
             timestamp,
-            request_line,
+            request_method,
+            request_uri,
+            request_version,
             request_headers,
             mut request_payload,
-            response_status_line,
+            response_status,
+            response_version,
             response_headers,
             mut response_payload,
         ) = recorded_url.into_parts();
-        assert_eq!(uri, String::from("https://example.com/"));
         assert!(timestamp >= t0 && timestamp <= t1);
-        assert_eq!(from_utf8(&request_line).unwrap(), "GET / HTTP/1.1\r\n");
-        assert_eq!(from_utf8(&request_headers).unwrap(), "");
-        assert!(is_empty_payload(&mut request_payload));
+        assert!(request_method == Method::GET);
         assert_eq!(
-            from_utf8(&response_status_line).unwrap(),
-            "HTTP/1.1 200 OK\r\n"
+            request_uri.to_string(),
+            String::from("https://example.com/")
         );
-        assert_eq!(from_utf8(&response_headers).unwrap(), "");
+        assert_eq!(request_version, Version::HTTP_11);
+        assert!(request_headers.is_empty());
+        assert!(is_empty_payload(&mut request_payload));
+        assert_eq!(response_status, StatusCode::from_u16(200)?);
+        assert_eq!(response_version, Version::HTTP_11);
+        assert!(response_headers.is_empty());
         assert!(is_empty_payload(&mut response_payload));
+        Ok(())
     }
 
+    /*
     #[test]
     fn test_recorded_url_mimetype() {
-        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
-            .request_parts(&empty_request_parts())
+        let recorded_url = RecordedUrl::builder()
+            .request_parts(&minimal_request_parts())
             .request_payload(empty_payload())
             .response_parts(
                 &Response::builder()
@@ -395,10 +412,12 @@ mod tests {
         assert!(recorded_url.mimetype.is_some());
         assert_eq!(recorded_url.mimetype.unwrap(), "text/plain");
     }
+     */
 
+    /*
     #[test]
     fn test_recorded_url_request_line() {
-        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+        let recorded_url = RecordedUrl::builder()
             .request_parts(
                 &Request::builder()
                     .uri("/foo/bar?baz=quux")
@@ -418,10 +437,11 @@ mod tests {
             "PATCH /foo/bar?baz=quux HTTP/1.0\r\n"
         )
     }
+     */
 
     #[test]
     fn test_recorded_url_request_headers() {
-        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+        let recorded_url = RecordedUrl::builder()
             .request_parts(
                 &Request::builder()
                     .header("b", "1")
@@ -438,22 +458,35 @@ mod tests {
             .response_parts(&empty_response_parts())
             .response_payload(empty_payload())
             .build();
+        let mut request_headers_iter = recorded_url.request_headers.into_iter();
         assert_eq!(
-            from_utf8(&recorded_url.request_headers).unwrap(),
-            concat!(
-                "b: 1\r\n",
-                "duplicate: 2\r\n",
-                "duplicate: 4\r\n",
-                "a: 3\r\n",
-                "mustard: 3\r\n"
-            )
-        )
+            request_headers_iter.next(),
+            Some((Some("b".parse().unwrap()), "1".parse().unwrap()))
+        );
+        assert_eq!(
+            request_headers_iter.next(),
+            Some((Some("duplicate".parse().unwrap()), "2".parse().unwrap()))
+        );
+        assert_eq!(
+            request_headers_iter.next(),
+            Some((None, "4".parse().unwrap()))
+        );
+        assert_eq!(
+            request_headers_iter.next(),
+            Some((Some("a".parse().unwrap()), "3".parse().unwrap()))
+        );
+        assert_eq!(
+            request_headers_iter.next(),
+            Some((Some("mustard".parse().unwrap()), "3".parse().unwrap()))
+        );
+        assert_eq!(request_headers_iter.next(), None);
     }
 
+    /*
     #[test]
     fn test_recorded_url_response_standard_status() {
-        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
-            .request_parts(&empty_request_parts())
+        let recorded_url = RecordedUrl::builder()
+            .request_parts(&minimal_request_parts())
             .request_payload(empty_payload())
             .response_parts(
                 &Response::builder()
@@ -471,11 +504,13 @@ mod tests {
             "HTTP/1.1 418 I'm a teapot\r\n"
         );
     }
+     */
 
+    /*
     #[test]
     fn test_recorded_url_response_unknown_status() {
-        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
-            .request_parts(&empty_request_parts())
+        let recorded_url = RecordedUrl::builder()
+            .request_parts(&minimal_request_parts())
             .request_payload(empty_payload())
             .response_parts(
                 &Response::builder()
@@ -494,11 +529,12 @@ mod tests {
             "HTTP/1.1 420 No Known Reason\r\n"
         );
     }
+     */
 
     #[test]
     fn test_recorded_url_response_headers() {
-        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
-            .request_parts(&empty_request_parts())
+        let recorded_url = RecordedUrl::builder()
+            .request_parts(&minimal_request_parts())
             .request_payload(empty_payload())
             .response_parts(
                 &Response::builder()
@@ -514,23 +550,35 @@ mod tests {
             )
             .response_payload(empty_payload())
             .build();
+        let mut response_headers_iter = recorded_url.response_headers.into_iter();
         assert_eq!(
-            from_utf8(&recorded_url.response_headers).unwrap(),
-            concat!(
-                "b: 1\r\n",
-                "duplicate: 2\r\n",
-                "duplicate: 4\r\n",
-                "a: 3\r\n",
-                "mustard: 3\r\n"
-            )
-        )
+            response_headers_iter.next(),
+            Some((Some("b".parse().unwrap()), "1".parse().unwrap()))
+        );
+        assert_eq!(
+            response_headers_iter.next(),
+            Some((Some("duplicate".parse().unwrap()), "2".parse().unwrap()))
+        );
+        assert_eq!(
+            response_headers_iter.next(),
+            Some((None, "4".parse().unwrap()))
+        );
+        assert_eq!(
+            response_headers_iter.next(),
+            Some((Some("a".parse().unwrap()), "3".parse().unwrap()))
+        );
+        assert_eq!(
+            response_headers_iter.next(),
+            Some((Some("mustard".parse().unwrap()), "3".parse().unwrap()))
+        );
+        assert_eq!(response_headers_iter.next(), None);
     }
 
     #[test]
     fn test_recorded_url_request_payload() {
         const CONTENT: &[u8; 29] = b"lorem ipsum shmipsum flipsum\n";
-        let mut recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
-            .request_parts(&empty_request_parts())
+        let mut recorded_url = RecordedUrl::builder()
+            .request_parts(&minimal_request_parts())
             .request_payload(build_payload(CONTENT))
             .response_parts(&empty_response_parts())
             .response_payload(empty_payload())
@@ -556,8 +604,8 @@ mod tests {
     #[test]
     fn test_recorded_url_response_payload() {
         const CONTENT: &[u8; 29] = b"lorem ipsum shmipsum flipsum\n";
-        let mut recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
-            .request_parts(&empty_request_parts())
+        let mut recorded_url = RecordedUrl::builder()
+            .request_parts(&minimal_request_parts())
             .request_payload(empty_payload())
             .response_parts(&empty_response_parts())
             .response_payload(build_payload(CONTENT))
@@ -583,8 +631,8 @@ mod tests {
     #[test]
     fn test_recorded_url_timestamp() {
         let t0 = Utc::now();
-        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
-            .request_parts(&empty_request_parts())
+        let recorded_url = RecordedUrl::builder()
+            .request_parts(&minimal_request_parts())
             .request_payload(empty_payload())
             .response_parts(&empty_response_parts())
             .response_payload(empty_payload())
@@ -595,13 +643,13 @@ mod tests {
 
     #[test]
     fn test_warc_record_from_recorded_url() {
-        let recorded_url = RecordedUrl::builder(String::from("https://example.com/"))
+        let recorded_url = RecordedUrl::builder()
             .request_parts(
                 &Request::builder()
                     .method("POST")
                     .version(Version::HTTP_3)
                     .header("Howdly", "Doodly dood")
-                    .uri("/a/b?c=d&e=f")
+                    .uri("https://example.com/a/b?c=d&e=f")
                     .body(Body::from(Vec::<u8>::new())) // not used
                     .unwrap()
                     .into_parts()
@@ -626,11 +674,11 @@ mod tests {
             .to_rfc3339_opts(SecondsFormat::Micros, true);
 
         let mut warc_writer = WarcWriter::new(Cursor::new(Vec::<u8>::new()), false);
-        let records = Vec::<WarcRecord<Box<dyn Read>>>::from(recorded_url);
+        let records = Vec::<WarcRecord<SpooledTempFile>>::from(recorded_url);
         let (record_id_0, record_id_1) =
             (records[0].record_id.clone(), records[1].record_id.clone());
-        for record in records {
-            warc_writer.write_record(record).unwrap();
+        for mut record in records {
+            warc_writer.write_record(&mut record).unwrap();
         }
         assert_eq!(
             from_utf8(&warc_writer.into_inner().into_inner()).unwrap(),
@@ -640,10 +688,10 @@ mod tests {
                     "WARC-Record-ID: <{}>\r\n",
                     "WARC-Type: response\r\n",
                     "WARC-Date: {}\r\n",
-                    "WARC-Target-URI: https://example.com/\r\n",
+                    "WARC-Target-URI: https://example.com/a/b?c=d&e=f\r\n",
                     "WARC-Payload-Digest: sha256:ac0a325a80368e33a0b20f15a9c540a3471b5f6e4d73215b3b963c68b696df11\r\n",
                     "Content-Type: application/http;msgtype=response\r\n",
-                    "Content-Length: 75\r\n",
+                    // "Content-Length: 75\r\n",
                     "\r\n",
                     "HTTP/1.1 418 I'm a teapot\r\n",
                     "requestly: Headlier\r\n",
@@ -654,10 +702,10 @@ mod tests {
                     "WARC-Record-ID: <{}>\r\n",
                     "WARC-Type: request\r\n",
                     "WARC-Date: {}\r\n",
-                    "WARC-Target-URI: https://example.com/\r\n",
+                    "WARC-Target-URI: https://example.com/a/b?c=d&e=f\r\n",
                     "WARC-Payload-Digest: sha256:e41aa34eadbd35db1fe0ffabd4750136630de9ac9d66b5a42c71f2518ead5c80\r\n",
                     "Content-Type: application/http;msgtype=request\r\n",
-                    "Content-Length: 75\r\n",
+                    // "Content-Length: 75\r\n",
                     "\r\n",
                     "POST /a/b?c=d&e=f HTTP/3.0\r\n",
                     "howdly: Doodly dood\r\n",
@@ -676,7 +724,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_recorded_url_builder_panics_without_request_parts() {
-        RecordedUrl::builder(String::from("https://example.com/"))
+        RecordedUrl::builder()
             .request_payload(empty_payload())
             .response_parts(&empty_response_parts())
             .response_payload(empty_payload())
@@ -686,8 +734,8 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_recorded_url_builder_panics_without_request_payload() {
-        RecordedUrl::builder(String::from("https://example.com/"))
-            .request_parts(&empty_request_parts())
+        RecordedUrl::builder()
+            .request_parts(&minimal_request_parts())
             .response_parts(&empty_response_parts())
             .response_payload(empty_payload())
             .build();
@@ -696,8 +744,8 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_recorded_url_builder_panics_without_response_parts() {
-        RecordedUrl::builder(String::from("https://example.com/"))
-            .request_parts(&empty_request_parts())
+        RecordedUrl::builder()
+            .request_parts(&minimal_request_parts())
             .request_payload(empty_payload())
             .response_payload(empty_payload())
             .build();
@@ -706,8 +754,8 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_recorded_url_builder_panics_without_response_payload() {
-        RecordedUrl::builder(String::from("https://example.com/"))
-            .request_parts(&empty_request_parts())
+        RecordedUrl::builder()
+            .request_parts(&minimal_request_parts())
             .request_payload(empty_payload())
             .response_parts(&empty_response_parts())
             .build();

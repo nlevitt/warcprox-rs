@@ -21,6 +21,7 @@ clap = { version = "4.0.32", features = ["derive"] }
 rustls-pemfile = "1.0.1"
 hyper-rustls = "0.23.2"
 rustls = { version = "0.20.8", features = ["dangerous_configuration"] }
+http = "0.2.9"
 
 [dev-dependencies]
 reqwest = { version = "0.11.13", features = ["rustls-tls"] }
@@ -35,5 +36,5 @@ test_common = { path = "test_common" }
 # hudsucker = { path = "../hudsucker" }
 # hyper = { path = "../hyper" }
 #
-# [patch."https://github.com/nlevitt/warcio-rs"]
-# warcio = { path = "../warcio-rs" }
+[patch."https://github.com/nlevitt/warcio-rs"]
+warcio = { path = "../warcio-rs" }
