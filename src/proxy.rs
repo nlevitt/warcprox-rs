@@ -13,7 +13,7 @@ use std::task::{Context, Poll};
 use tempfile::SpooledTempFile;
 use tracing::debug;
 
-use crate::recorded_url::{Payload, RecordedUrl, RecordedUrlBuilder};
+use crate::recorded_url::{RecordedPayload, RecordedUrl, RecordedUrlBuilder};
 
 const SPOOLED_TEMPFILE_MAX_SIZE: usize = 512 * 1024;
 
@@ -22,11 +22,11 @@ struct PayloadStream<T: Stream<Item = Result<Bytes, Error>> + Unpin> {
     inner_stream: T,
     sha256: Option<Sha256>,
     recorder: Option<SpooledTempFile>,
-    tx: Option<oneshot::Sender<Payload>>,
+    tx: Option<oneshot::Sender<RecordedPayload>>,
 }
 
 impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> PayloadStream<T> {
-    fn wrap(inner_stream: T, tx: oneshot::Sender<Payload>) -> PayloadStream<T> {
+    fn wrap(inner_stream: T, tx: oneshot::Sender<RecordedPayload>) -> PayloadStream<T> {
         PayloadStream {
             inner_stream,
             sha256: Some(Sha256::new()),
@@ -59,13 +59,13 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for PayloadStream<T> {
     fn drop(&mut self) {
         let mut payload: SpooledTempFile = self.recorder.take().unwrap();
         let sha256: Output<Sha256> = self.sha256.take().unwrap().finalize();
-        let length = payload.seek(SeekFrom::End(0)).unwrap() as usize;
+        let length = payload.seek(SeekFrom::End(0)).unwrap();
         payload.seek(SeekFrom::Start(0)).unwrap();
 
         self.tx
             .take()
             .unwrap()
-            .send(Payload {
+            .send(RecordedPayload {
                 payload,
                 sha256,
                 length,
@@ -78,7 +78,7 @@ impl<T: Stream<Item = Result<Bytes, Error>> + Unpin> Drop for PayloadStream<T> {
 pub(crate) struct ProxyTransactionHandler {
     pub(crate) recorded_url_builder: Option<RecordedUrlBuilder>,
     pub(crate) recorded_url_tx: Option<mpsc::Sender<RecordedUrl>>,
-    request_payload_rx: Option<oneshot::Receiver<Payload>>,
+    request_payload_rx: Option<oneshot::Receiver<RecordedPayload>>,
     is_connect: bool,
 }
 
@@ -107,8 +107,8 @@ impl Clone for ProxyTransactionHandler {
 
 fn await_payloads_and_queue_postfetch(
     recorded_url_builder: RecordedUrlBuilder,
-    request_payload_rx: oneshot::Receiver<Payload>,
-    response_payload_rx: oneshot::Receiver<Payload>,
+    request_payload_rx: oneshot::Receiver<RecordedPayload>,
+    response_payload_rx: oneshot::Receiver<RecordedPayload>,
     mut recorded_url_tx: mpsc::Sender<RecordedUrl>,
 ) {
     tokio::spawn(async move {
@@ -137,9 +137,8 @@ impl HttpHandler for ProxyTransactionHandler {
             return Request::from_parts(parts, body).into();
         }
 
-        self.recorded_url_builder =
-            Some(RecordedUrl::builder(parts.uri.to_string()).request_parts(&parts));
-        let (request_payload_tx, request_payload_rx) = oneshot::channel::<Payload>();
+        self.recorded_url_builder = Some(RecordedUrl::builder().request_parts(&parts));
+        let (request_payload_tx, request_payload_rx) = oneshot::channel::<RecordedPayload>();
         let body = Body::wrap_stream(PayloadStream::wrap(body, request_payload_tx));
         self.request_payload_rx = Some(request_payload_rx);
         Request::from_parts(parts, body).into()
@@ -159,7 +158,7 @@ impl HttpHandler for ProxyTransactionHandler {
         let mut recorded_url_builder = self.recorded_url_builder.take().unwrap();
         recorded_url_builder = recorded_url_builder.response_parts(&parts);
 
-        let (response_payload_tx, response_payload_rx) = oneshot::channel::<Payload>();
+        let (response_payload_tx, response_payload_rx) = oneshot::channel::<RecordedPayload>();
         let body = Body::wrap_stream(PayloadStream::wrap(body, response_payload_tx));
 
         await_payloads_and_queue_postfetch(
@@ -183,11 +182,13 @@ mod tests {
     use chrono::Utc;
     use futures::channel::{mpsc, oneshot};
     use futures::StreamExt;
+    use http::{Method, StatusCode, Uri, Version};
     use hudsucker::Proxy;
+    use std::error::Error;
     use std::fs::File;
     use std::io::{BufReader, Seek, SeekFrom};
     use std::net::{SocketAddr, TcpListener, ToSocketAddrs as _};
-    use std::str::from_utf8;
+    use std::str::FromStr;
     use tempfile::TempDir;
     use test_common::{http_client, start_http_server, start_https_server};
 
@@ -235,7 +236,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_proxy_http_url() {
+    async fn test_proxy_http_url() -> Result<(), Box<dyn Error>> {
         let mut proxy_info = start_proxy();
         let client = http_client(proxy_info.addr);
 
@@ -247,18 +248,16 @@ mod tests {
         let t1 = Utc::now();
 
         let mut recorded_url = proxy_info.recorded_url_rx.next().await.unwrap();
-        assert_eq!(recorded_url.uri, url);
         assert!(recorded_url.timestamp >= t0 && recorded_url.timestamp <= t1);
-        assert_eq!(
-            from_utf8(&recorded_url.request_line).unwrap(),
-            "GET / HTTP/1.1\r\n"
-        );
+        assert_eq!(recorded_url.request_method, Method::GET);
+        assert_eq!(recorded_url.request_uri, Uri::from_str(&url)?);
+        assert_eq!(recorded_url.request_version, Version::HTTP_11);
+
         let request_payload_str = {
             recorded_url
                 .request_payload
                 .payload
-                .seek(SeekFrom::Start(0))
-                .unwrap();
+                .seek(SeekFrom::Start(0))?;
             std::io::read_to_string(recorded_url.request_payload.payload).unwrap()
         };
         assert_eq!(request_payload_str, "");
@@ -268,7 +267,7 @@ mod tests {
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
 
-        assert_eq!(recorded_url.status, 200);
+        assert_eq!(recorded_url.response_status, 200);
         let response_payload_str = {
             recorded_url
                 .response_payload
@@ -278,18 +277,18 @@ mod tests {
             std::io::read_to_string(recorded_url.response_payload.payload).unwrap()
         };
         assert_eq!(response_payload_str, "http server response body\n");
-        assert_eq!(
-            from_utf8(&recorded_url.response_status_line).unwrap(),
-            "HTTP/1.1 200 OK\r\n"
-        );
+        assert_eq!(recorded_url.response_status, StatusCode::from_u16(200)?);
+        assert_eq!(recorded_url.response_version, Version::HTTP_11);
 
         assert!(proxy_info.recorded_url_rx.try_next().is_err());
 
         proxy_info.stop_proxy_tx.send(()).unwrap();
+
+        Ok(())
     }
 
     #[test_log::test(tokio::test)]
-    async fn test_proxy_https_url() {
+    async fn test_proxy_https_url() -> Result<(), Box<dyn Error>> {
         let mut proxy_info = start_proxy();
         let client = http_client(proxy_info.addr);
 
@@ -302,12 +301,10 @@ mod tests {
         let t1 = Utc::now();
 
         let mut recorded_url = proxy_info.recorded_url_rx.next().await.unwrap();
-        assert_eq!(recorded_url.uri, url);
         assert!(recorded_url.timestamp >= t0 && recorded_url.timestamp <= t1);
-        assert_eq!(
-            from_utf8(&recorded_url.request_line).unwrap(),
-            "GET / HTTP/1.1\r\n"
-        );
+        assert_eq!(recorded_url.request_method, Method::GET);
+        assert_eq!(recorded_url.request_uri, Uri::from_str(&url)?);
+        assert_eq!(recorded_url.request_version, Version::HTTP_11);
         let request_payload_str = {
             recorded_url
                 .request_payload
@@ -323,7 +320,8 @@ mod tests {
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
 
-        assert_eq!(recorded_url.status, 200);
+        assert_eq!(recorded_url.response_version, Version::HTTP_11);
+        assert_eq!(recorded_url.response_status, StatusCode::from_u16(200)?);
         let response_payload_str = {
             recorded_url
                 .response_payload
@@ -333,13 +331,11 @@ mod tests {
             std::io::read_to_string(recorded_url.response_payload.payload).unwrap()
         };
         assert_eq!(response_payload_str, "https server response body\n");
-        assert_eq!(
-            from_utf8(&recorded_url.response_status_line).unwrap(),
-            "HTTP/1.1 200 OK\r\n"
-        );
 
         assert!(proxy_info.recorded_url_rx.try_next().is_err());
 
         proxy_info.stop_proxy_tx.send(()).unwrap();
+
+        Ok(())
     }
 }
