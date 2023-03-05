@@ -5,13 +5,13 @@ use sha2::digest::Output;
 use sha2::Sha256;
 use std::fmt::Debug;
 use tempfile::SpooledTempFile;
-use warcio::{WarcRecord, WarcRecordType};
+use warcio::{HttpRequest, HttpResponse, WarcRecord, WarcRecordPayload, WarcRecordType};
 
 #[derive(Debug)]
-pub(crate) struct Payload {
+pub(crate) struct RecordedPayload {
     pub(crate) sha256: Output<Sha256>,
     pub(crate) payload: SpooledTempFile,
-    pub(crate) length: usize,
+    pub(crate) length: u64,
 }
 
 #[derive(Debug)]
@@ -22,12 +22,12 @@ pub(crate) struct RecordedUrl {
     pub(crate) request_uri: Uri,
     pub(crate) request_version: Version,
     pub(crate) request_headers: HeaderMap<HeaderValue>,
-    pub(crate) request_payload: Payload,
+    pub(crate) request_payload: RecordedPayload,
 
     pub(crate) response_status: StatusCode,
     pub(crate) response_version: Version,
     pub(crate) response_headers: HeaderMap<HeaderValue>,
-    pub(crate) response_payload: Payload,
+    pub(crate) response_payload: RecordedPayload,
 }
 
 impl RecordedUrl {
@@ -56,11 +56,11 @@ impl RecordedUrl {
         Uri,
         Version,
         HeaderMap<HeaderValue>,
-        Payload,
+        RecordedPayload,
         StatusCode,
         Version,
         HeaderMap<HeaderValue>,
-        Payload,
+        RecordedPayload,
     ) {
         (
             self.timestamp,
@@ -85,17 +85,17 @@ pub(crate) struct RecordedUrlBuilder {
     request_uri: Option<Uri>,
     request_version: Option<Version>,
     request_headers: Option<HeaderMap<HeaderValue>>,
-    request_payload: Option<Payload>,
+    request_payload: Option<RecordedPayload>,
 
     response_status: Option<StatusCode>,
     response_version: Option<Version>,
     response_headers: Option<HeaderMap<HeaderValue>>,
-    response_payload: Option<Payload>,
+    response_payload: Option<RecordedPayload>,
 }
 
 impl RecordedUrlBuilder {
     pub(crate) fn request_parts(mut self, parts: &request::Parts) -> Self {
-        // avoid cloning?
+        // todo: avoid cloning?
         self.request_method = Some(parts.method.clone());
         self.request_uri = Some(parts.uri.clone());
         self.request_version = Some(parts.version);
@@ -103,34 +103,19 @@ impl RecordedUrlBuilder {
         self
     }
 
-    pub(crate) fn request_payload(mut self, payload: Payload) -> Self {
+    pub(crate) fn request_payload(mut self, payload: RecordedPayload) -> Self {
         self.request_payload = Some(payload);
         self
     }
 
     pub(crate) fn response_parts(mut self, parts: &response::Parts) -> Self {
-        // avoid cloning?
         self.response_status = Some(parts.status);
         self.response_version = Some(parts.version);
-        self.response_headers = Some(parts.headers.clone());
-        /*
-        if let Some(content_type) = parts.headers.get("content-type") {
-            if let Ok(content_type) = content_type.to_str() {
-                if let Some(semicolon_offset) = content_type.find(';') {
-                    self.mimetype = Some(String::from(&content_type[..semicolon_offset]));
-                } else {
-                    self.mimetype = Some(String::from(content_type));
-                }
-            }
-        }
-        self.response_status_line = Some(response_status_line_as_bytes(parts));
-        self.response_headers = Some(headers_as_bytes(&parts.headers));
-        self.status = Some(u16::from(parts.status));
-         */
+        self.response_headers = Some(parts.headers.clone()); // todo: avoid cloning?
         self
     }
 
-    pub(crate) fn response_payload(mut self, payload: Payload) -> Self {
+    pub(crate) fn response_payload(mut self, payload: RecordedPayload) -> Self {
         self.response_payload = Some(payload);
         self
     }
@@ -138,7 +123,7 @@ impl RecordedUrlBuilder {
     /// Build a RecordedUrl, consuming the builder. `request_parts()`, `request_payload()`,
     /// `response_parts()` and `response_payload()` must have been called, or this method will
     /// panic.
-    pub(crate) fn build(mut self) -> RecordedUrl {
+    pub(crate) fn build(self) -> RecordedUrl {
         RecordedUrl {
             timestamp: self.timestamp,
 
@@ -159,25 +144,32 @@ impl RecordedUrlBuilder {
 fn response_record(
     uri: &Uri,
     timestamp: DateTime<Utc>,
+    request_method: Method,
     response_status: StatusCode,
     response_version: Version,
     response_headers: HeaderMap<HeaderValue>,
-    response_payload: Payload,
+    response_payload: RecordedPayload,
 ) -> WarcRecord<SpooledTempFile> {
+    let http_response = HttpResponse::new(
+        response_version,
+        response_status,
+        response_headers,
+        response_payload.length,
+        response_payload.payload,
+    );
+    let record_content_length = http_response.length;
+    let payload = WarcRecordPayload::HttpResponse(http_response);
     let record = WarcRecord::builder()
         .generate_record_id()
+        .method_metadata(request_method)
         .warc_type(WarcRecordType::Response)
         .warc_date(timestamp)
         .warc_target_uri(&uri.to_string().into_bytes())
         // .warc_ip_address
         .warc_payload_digest(format!("sha256:{:x}", &response_payload.sha256).as_bytes())
         .content_type(b"application/http;msgtype=response")
-        .http_response(
-            response_version,
-            response_status,
-            response_headers,
-            response_payload.payload,
-        )
+        .content_length(record_content_length)
+        .payload(payload)
         .build();
     record
 }
@@ -188,8 +180,18 @@ fn request_record(
     request_method: Method,
     request_version: Version,
     request_headers: HeaderMap<HeaderValue>,
-    request_payload: Payload,
+    request_payload: RecordedPayload,
 ) -> WarcRecord<SpooledTempFile> {
+    let http_request = HttpRequest::new(
+        request_method,
+        uri,
+        request_version,
+        request_headers,
+        request_payload.length,
+        request_payload.payload,
+    );
+    let record_content_length = http_request.length;
+    let payload = WarcRecordPayload::HttpRequest(http_request);
     let record = WarcRecord::builder()
         .generate_record_id()
         .warc_type(WarcRecordType::Request)
@@ -197,57 +199,11 @@ fn request_record(
         .warc_target_uri(&uri.to_string().into_bytes())
         .warc_payload_digest(format!("sha256:{:x}", &request_payload.sha256).as_bytes())
         .content_type(b"application/http;msgtype=request")
-        // should not use the full uri here, but also the proxy's outgoing request should not use
-        // the full uri
-        .http_request(
-            request_method,
-            uri,
-            request_version,
-            request_headers,
-            request_payload.payload,
-        )
-        // method: Method,
-        // uri: Uri,
-        // version: Version,
-        // headers: HeaderMap<HeaderValue>,
-        // body: R,
+        .content_length(record_content_length)
+        .payload(payload)
         .build();
     record
 }
-
-/*
-fn request_record(
-    uri: &String,
-    timestamp: DateTime<Utc>,
-    request_line: Vec<u8>,
-    request_headers: Vec<u8>,
-    request_payload: Payload,
-) -> WarcRecord<Box<dyn Read>> {
-    let full_http_request_length: u64 = request_line.len() as u64
-        + request_headers.len() as u64
-        + 2
-        + request_payload.length as u64;
-    let full_http_request: Box<dyn Read> = Box::new(
-        Cursor::new(request_line)
-            .chain(Cursor::new(request_headers))
-            .chain(&b"\r\n"[..])
-            .chain(request_payload.payload),
-    );
-
-    let record = WarcRecord::builder()
-        .generate_record_id()
-        .warc_type(WarcRecordType::Request)
-        .warc_date(timestamp)
-        .warc_target_uri(uri.as_bytes())
-        // .warc_ip_address
-        .warc_payload_digest(format!("sha256:{:x}", &request_payload.sha256).as_bytes())
-        .content_type(b"application/http;msgtype=request")
-        .content_length(full_http_request_length)
-        .body(full_http_request)
-        .build();
-    record
-}
- */
 
 impl From<RecordedUrl> for Vec<WarcRecord<SpooledTempFile>> {
     fn from(recorded_url: RecordedUrl) -> Self {
@@ -268,6 +224,7 @@ impl From<RecordedUrl> for Vec<WarcRecord<SpooledTempFile>> {
         records.push(response_record(
             &request_uri,
             timestamp,
+            request_method.clone(),
             response_status,
             response_version,
             response_headers,
@@ -288,9 +245,9 @@ impl From<RecordedUrl> for Vec<WarcRecord<SpooledTempFile>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::recorded_url::{Payload, RecordedUrl};
+    use crate::recorded_url::{RecordedPayload, RecordedUrl};
     use chrono::{SecondsFormat, Utc};
-    use http::{HeaderName, HeaderValue, StatusCode};
+    use http::StatusCode;
     use hudsucker::hyper::http::{request, response};
     use hudsucker::hyper::{Body, Method, Request, Response, Version};
     use sha2::{Digest, Sha256};
@@ -300,15 +257,15 @@ mod tests {
     use tempfile::SpooledTempFile;
     use warcio::{WarcRecord, WarcRecordWrite as _, WarcWriter};
 
-    fn empty_payload() -> Payload {
-        Payload {
+    fn empty_payload() -> RecordedPayload {
+        RecordedPayload {
             payload: SpooledTempFile::new(4),
             sha256: Sha256::new().finalize(),
             length: 0,
         }
     }
 
-    fn is_empty_payload(payload: &mut Payload) -> bool {
+    fn is_empty_payload(payload: &mut RecordedPayload) -> bool {
         let mut buf = Vec::<u8>::new();
         payload.payload.seek(SeekFrom::Start(0)).unwrap();
         payload.payload.read_to_end(&mut buf).unwrap();
@@ -322,15 +279,15 @@ mod tests {
             && payload.length == 0
     }
 
-    fn build_payload(content: &[u8]) -> Payload {
+    fn build_payload(content: &[u8]) -> RecordedPayload {
         let mut f = SpooledTempFile::new(500000);
         let mut sha = Sha256::new();
         f.write_all(content).unwrap();
         sha.update(content);
-        let length = f.seek(SeekFrom::End(0)).unwrap() as usize;
+        let length = f.seek(SeekFrom::End(0)).unwrap();
         f.seek(SeekFrom::Start(0)).unwrap();
 
-        Payload {
+        RecordedPayload {
             payload: f,
             sha256: sha.finalize(),
             length,
@@ -378,7 +335,7 @@ mod tests {
             mut response_payload,
         ) = recorded_url.into_parts();
         assert!(timestamp >= t0 && timestamp <= t1);
-        assert!(request_method == Method::GET);
+        assert_eq!(request_method, Method::GET);
         assert_eq!(
             request_uri.to_string(),
             String::from("https://example.com/")
@@ -591,7 +548,7 @@ mod tests {
             .read_to_end(&mut buf)
             .unwrap();
         assert_eq!(&buf, CONTENT);
-        assert_eq!(recorded_url.request_payload.length, CONTENT.len());
+        assert_eq!(recorded_url.request_payload.length, CONTENT.len() as u64);
         assert_eq!(
             recorded_url.request_payload.sha256.as_slice(),
             [
@@ -618,7 +575,7 @@ mod tests {
             .read_to_end(&mut buf)
             .unwrap();
         assert_eq!(buf, CONTENT);
-        assert_eq!(recorded_url.response_payload.length, CONTENT.len());
+        assert_eq!(recorded_url.response_payload.length, CONTENT.len() as u64);
         assert_eq!(
             recorded_url.response_payload.sha256.as_slice(),
             [
@@ -642,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn test_warc_record_from_recorded_url() {
+    fn test_warc_record_from_recorded_url() -> Result<(), Box<dyn Error>> {
         let recorded_url = RecordedUrl::builder()
             .request_parts(
                 &Request::builder()
@@ -650,7 +607,7 @@ mod tests {
                     .version(Version::HTTP_3)
                     .header("Howdly", "Doodly dood")
                     .uri("https://example.com/a/b?c=d&e=f")
-                    .body(Body::from(Vec::<u8>::new())) // not used
+                    .body(Body::from(Vec::<u8>::new()))
                     .unwrap()
                     .into_parts()
                     .0,
@@ -675,11 +632,13 @@ mod tests {
 
         let mut warc_writer = WarcWriter::new(Cursor::new(Vec::<u8>::new()), false);
         let records = Vec::<WarcRecord<SpooledTempFile>>::from(recorded_url);
-        let (record_id_0, record_id_1) =
-            (records[0].record_id.clone(), records[1].record_id.clone());
-        for mut record in records {
-            warc_writer.write_record(&mut record).unwrap();
-        }
+        let record_ids = records
+            .into_iter()
+            .map(|record| {
+                let warc_record_info = warc_writer.write_record(record, None).unwrap();
+                warc_record_info.warc_record_metadata.record_id.unwrap()
+            })
+            .collect::<Vec<Vec<u8>>>();
         assert_eq!(
             from_utf8(&warc_writer.into_inner().into_inner()).unwrap(),
             format!(
@@ -691,7 +650,7 @@ mod tests {
                     "WARC-Target-URI: https://example.com/a/b?c=d&e=f\r\n",
                     "WARC-Payload-Digest: sha256:ac0a325a80368e33a0b20f15a9c540a3471b5f6e4d73215b3b963c68b696df11\r\n",
                     "Content-Type: application/http;msgtype=response\r\n",
-                    // "Content-Length: 75\r\n",
+                    "Content-Length: 75\r\n",
                     "\r\n",
                     "HTTP/1.1 418 I'm a teapot\r\n",
                     "requestly: Headlier\r\n",
@@ -705,7 +664,7 @@ mod tests {
                     "WARC-Target-URI: https://example.com/a/b?c=d&e=f\r\n",
                     "WARC-Payload-Digest: sha256:e41aa34eadbd35db1fe0ffabd4750136630de9ac9d66b5a42c71f2518ead5c80\r\n",
                     "Content-Type: application/http;msgtype=request\r\n",
-                    // "Content-Length: 75\r\n",
+                    "Content-Length: 75\r\n",
                     "\r\n",
                     "POST /a/b?c=d&e=f HTTP/3.0\r\n",
                     "howdly: Doodly dood\r\n",
@@ -713,12 +672,13 @@ mod tests {
                     "I'm your request payload\r\n",
                     "\r\n",
                 ),
-                record_id_0,
+                from_utf8(record_ids.get(0).unwrap())?,
                 warc_date,
-                record_id_1,
+                from_utf8(record_ids.get(1).unwrap())?,
                 warc_date
             )
         );
+        Ok(())
     }
 
     #[test]
