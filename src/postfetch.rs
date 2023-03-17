@@ -1,8 +1,13 @@
 use crate::recorded_url::RecordedUrl;
 use std::borrow::Cow;
 
+use aho_corasick::AhoCorasick;
+use chrono::Utc;
 use futures::channel::mpsc::Receiver;
 use futures::StreamExt;
+use rand::distributions::uniform::Uniform;
+use rand::distributions::Distribution;
+use rand::{thread_rng, Rng};
 use std::fs::{create_dir, File};
 use std::io::{Error, Read};
 use std::path::Path;
@@ -17,9 +22,81 @@ struct RollingWarcWriter<'a> {
     current_warc_filename: Option<Vec<u8>>,
     inner: Option<WarcWriter<File>>,
     n: u64,
+    random_token: String,
 }
 
+const TEMPLATE_PARAM_KEYS: [&str; 4] = [
+    // "{prefix}", // python warcprox has option:
+    //             // -n PREFIX, --prefix PREFIX  default WARC filename prefix (default: WARCPROX)
+    "{timestamp17}",
+    "{serialno}",
+    "{randomtoken}",
+    "{maybe_dot_gz}",
+    // "timestamp14",
+    // "hostname",
+    // "shorthostname",
+    // "port",
+];
+const DEFAULT_FILENAME_TEMPLATE: &str =
+    "warcprox-{timestamp17}-{serialno}-{randomtoken}.warc{maybe_dot_gz}";
+
+struct LowercaseAlphanumeric;
+const LOWERCASE_ALPHANUMERIC_BYTES: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+
 impl<'a> RollingWarcWriter<'a> {
+    fn new(dir: &'a Path, gzip: bool, rollover_size: u64) -> Self {
+        let random_token: String = (0..8)
+            .map(|_| thread_rng().sample(LowercaseAlphanumeric))
+            .collect();
+        Self {
+            dir,
+            gzip,
+            rollover_size,
+            current_warc_filename: None,
+            inner: None,
+            n: 0,
+            random_token,
+        }
+    }
+
+    fn build_filename(&self) -> String {
+        // todo: cache these in RollingWarcWriter?
+        let template_param_finder: AhoCorasick = AhoCorasick::new(TEMPLATE_PARAM_KEYS);
+
+        impl Distribution<char> for LowercaseAlphanumeric {
+            fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> char {
+                let byte_picker: Uniform<usize> =
+                    Uniform::from(0..LOWERCASE_ALPHANUMERIC_BYTES.len());
+                LOWERCASE_ALPHANUMERIC_BYTES[byte_picker.sample(rng)] as char
+            }
+        }
+
+        let mut new_filename_buf = String::new();
+        template_param_finder.replace_all_with(
+            DEFAULT_FILENAME_TEMPLATE,
+            &mut new_filename_buf,
+            |_, match_, output_buf| {
+                if match_ == "{timestamp17}" {
+                    // let t17 = Utc::now().format("%Y%m%d%H%M%S%.3f").to_string(); // extra dot
+                    let now = Utc::now();
+                    let mut t17 = now.format("%Y%m%d%H%M%S").to_string();
+                    t17.push_str(&format!("{:03}", now.timestamp_subsec_millis()));
+                    output_buf.push_str(&t17);
+                } else if match_ == "{serialno}" {
+                    output_buf.push_str(&format!("{:05}", self.n));
+                } else if match_ == "{randomtoken}" {
+                    output_buf.push_str(&self.random_token);
+                } else if match_ == "{maybe_dot_gz}" {
+                    if self.gzip {
+                        output_buf.push_str(".gz");
+                    }
+                }
+                true
+            },
+        );
+        new_filename_buf
+    }
+
     /// Returns Ok((warc_path, offset))
     fn write_records<R: Read>(
         &mut self,
@@ -36,7 +113,7 @@ impl<'a> RollingWarcWriter<'a> {
                 create_dir(self.dir)?;
             }
 
-            let warc_filename = format!("warcprox-rs-{:05}.warc.gz", self.n);
+            let warc_filename = self.build_filename();
 
             let mut p = self.dir.to_path_buf();
             p.push(&warc_filename);
@@ -44,7 +121,7 @@ impl<'a> RollingWarcWriter<'a> {
             let w = WarcWriter::new(f, self.gzip);
 
             self.inner = Some(w);
-            self.current_warc_filename = Some(Vec::from(warc_filename));
+            self.current_warc_filename = Some(Vec::from(warc_filename.as_bytes()));
             self.n += 1;
         }
 
@@ -112,21 +189,12 @@ fn log(warc_record_info: WarcRecordInfo) {
 
 pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
     tokio::spawn(async move {
-        let mut warc_writer = RollingWarcWriter {
-            dir: "./warcs".as_ref(),
-            gzip,
-            rollover_size: 1000000,
-            current_warc_filename: None,
-            inner: None,
-            n: 0,
-        };
-
+        let mut warc_writer = RollingWarcWriter::new("./warcs".as_ref(), gzip, 1_000_000_000);
         while let Some(recorded_url) = rx.next().await {
             let records = Vec::<WarcRecord<SpooledTempFile>>::from(recorded_url);
             let warc_record_info = warc_writer.write_records(records)?;
             log(warc_record_info);
         }
-
         Ok::<(), Error>(())
     });
 }

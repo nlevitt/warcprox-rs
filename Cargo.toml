@@ -22,6 +22,8 @@ rustls-pemfile = "1.0.1"
 hyper-rustls = "0.23.2"
 rustls = { version = "0.20.8", features = ["dangerous_configuration"] }
 http = "0.2.9"
+aho-corasick = "0.7.20"
+rand = "0.8.5"
 
 [dev-dependencies]
 reqwest = { version = "0.11.13", features = ["rustls-tls"] }

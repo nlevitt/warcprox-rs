@@ -27,7 +27,7 @@ struct Args {
         short = 'z',
         long,
         default_value_t = false,
-        help = "write gzip-compressed warc records"
+        help = "Write gzip-compressed warc records"
     )]
     gzip: bool,
 }
