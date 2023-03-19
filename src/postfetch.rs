@@ -5,6 +5,7 @@ use aho_corasick::AhoCorasick;
 use chrono::Utc;
 use futures::channel::mpsc::Receiver;
 use futures::StreamExt;
+use gethostname::gethostname;
 use rand::distributions::uniform::Uniform;
 use rand::distributions::Distribution;
 use rand::{thread_rng, Rng};
@@ -17,45 +18,51 @@ use warcio::{WarcRecord, WarcRecordInfo, WarcRecordWrite, WarcWriter};
 
 struct RollingWarcWriter<'a> {
     dir: &'a Path,
+    filename_template: String,
     gzip: bool,
     rollover_size: u64,
     current_warc_filename: Option<Vec<u8>>,
     inner: Option<WarcWriter<File>>,
     n: u64,
     random_token: String,
+    port: u16,
 }
 
-const TEMPLATE_PARAM_KEYS: [&str; 4] = [
-    // "{prefix}", // python warcprox has option:
-    //             // -n PREFIX, --prefix PREFIX  default WARC filename prefix (default: WARCPROX)
+const TEMPLATE_PARAM_KEYS: [&str; 7] = [
+    "{timestamp14}",
     "{timestamp17}",
     "{serialno}",
     "{randomtoken}",
     "{maybe_dot_gz}",
-    // "timestamp14",
-    // "hostname",
-    // "shorthostname",
-    // "port",
+    "{hostname}",
+    // "{shorthostname}",
+    "{port}",
 ];
-const DEFAULT_FILENAME_TEMPLATE: &str =
-    "warcprox-{timestamp17}-{serialno}-{randomtoken}.warc{maybe_dot_gz}";
 
 struct LowercaseAlphanumeric;
 const LOWERCASE_ALPHANUMERIC_BYTES: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
 impl<'a> RollingWarcWriter<'a> {
-    fn new(dir: &'a Path, gzip: bool, rollover_size: u64) -> Self {
+    fn new(
+        dir: &'a Path,
+        filename_template: String,
+        gzip: bool,
+        rollover_size: u64,
+        port: u16,
+    ) -> Self {
         let random_token: String = (0..8)
             .map(|_| thread_rng().sample(LowercaseAlphanumeric))
             .collect();
         Self {
             dir,
+            filename_template,
             gzip,
             rollover_size,
             current_warc_filename: None,
             inner: None,
             n: 0,
             random_token,
+            port,
         }
     }
 
@@ -73,7 +80,7 @@ impl<'a> RollingWarcWriter<'a> {
 
         let mut new_filename_buf = String::new();
         template_param_finder.replace_all_with(
-            DEFAULT_FILENAME_TEMPLATE,
+            &self.filename_template,
             &mut new_filename_buf,
             |_, match_, output_buf| {
                 if match_ == "{timestamp17}" {
@@ -82,6 +89,18 @@ impl<'a> RollingWarcWriter<'a> {
                     let mut t17 = now.format("%Y%m%d%H%M%S").to_string();
                     t17.push_str(&format!("{:03}", now.timestamp_subsec_millis()));
                     output_buf.push_str(&t17);
+                } else if match_ == "{timestamp14}" {
+                    let now = Utc::now();
+                    let t14 = now.format("%Y%m%d%H%M%S").to_string();
+                    output_buf.push_str(&t14);
+                } else if match_ == "{hostname}" {
+                    output_buf.push_str(
+                        &gethostname()
+                            .into_string()
+                            .unwrap_or(String::from("unknown")),
+                    );
+                } else if match_ == "{port}" {
+                    output_buf.push_str(&self.port.to_string());
                 } else if match_ == "{serialno}" {
                     output_buf.push_str(&format!("{:05}", self.n));
                 } else if match_ == "{randomtoken}" {
@@ -187,9 +206,20 @@ fn log(warc_record_info: WarcRecordInfo) {
     );
 }
 
-pub(crate) fn spawn_postfetch(mut rx: Receiver<RecordedUrl>, gzip: bool) {
+pub(crate) fn spawn_postfetch(
+    mut rx: Receiver<RecordedUrl>,
+    gzip: bool,
+    warc_filename_template: String,
+    port: u16,
+) {
     tokio::spawn(async move {
-        let mut warc_writer = RollingWarcWriter::new("./warcs".as_ref(), gzip, 1_000_000_000);
+        let mut warc_writer = RollingWarcWriter::new(
+            "./warcs".as_ref(),
+            warc_filename_template,
+            gzip,
+            1_000_000_000,
+            port,
+        );
         while let Some(recorded_url) = rx.next().await {
             let records = Vec::<WarcRecord<SpooledTempFile>>::from(recorded_url);
             let warc_record_info = warc_writer.write_records(records)?;

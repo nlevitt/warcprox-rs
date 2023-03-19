@@ -12,11 +12,13 @@ use std::future::Future;
 use std::net::{SocketAddr, TcpListener};
 
 pub struct WarcProxy {
+    pub addr: SocketAddr,
     proxy:
         Proxy<HttpsConnector<HttpConnector>, RcgenAuthority, ProxyTransactionHandler, NoopHandler>,
     recorded_url_rx: mpsc::Receiver<RecordedUrl>,
     gzip: bool,
-    pub addr: SocketAddr,
+    warc_filename_template: String,
+    port: u16,
 }
 
 impl WarcProxy {
@@ -24,10 +26,12 @@ impl WarcProxy {
         address: &str,
         gzip: bool,
         ca_cert_path: &str,
+        warc_filename_template: String,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let ca = ca::certauth(&ca_cert_path)?;
         let (recorded_url_tx, recorded_url_rx) = mpsc::channel::<RecordedUrl>(500);
         let tcp_listener = TcpListener::bind(address)?;
+        let port = tcp_listener.local_addr()?.port();
         Ok(Self {
             addr: tcp_listener.local_addr()?,
             proxy: Proxy::builder()
@@ -38,6 +42,8 @@ impl WarcProxy {
                 .build(),
             recorded_url_rx,
             gzip,
+            warc_filename_template,
+            port,
         })
     }
 
@@ -45,7 +51,12 @@ impl WarcProxy {
         self,
         shutdown_signal: F,
     ) -> Result<(), hudsucker::Error> {
-        spawn_postfetch(self.recorded_url_rx, self.gzip);
+        spawn_postfetch(
+            self.recorded_url_rx,
+            self.gzip,
+            self.warc_filename_template,
+            self.port,
+        );
         self.proxy.start(shutdown_signal).await
     }
 }

@@ -30,6 +30,13 @@ struct Args {
         help = "Write gzip-compressed warc records"
     )]
     gzip: bool,
+
+    #[arg(
+        long,
+        default_value = "warcprox-{timestamp17}-{serialno}-{randomtoken}.warc{maybe_dot_gz}",
+        help = "Define custom WARC filename using variables {timestamp14}, {timestamp17}, {serialno}, {randomtoken}, {hostname}, {port}, {maybe_dot_gz}"
+    )]
+    warc_filename: String,
 }
 
 #[tokio::main]
@@ -38,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
     let address = format!("{}:{}", args.address, args.port);
-    let warcproxy = WarcProxy::new(&address, args.gzip, &args.ca_cert)?;
+    let warcproxy = WarcProxy::new(&address, args.gzip, &args.ca_cert, args.warc_filename)?;
 
     info!("warcprox listening at {}", address);
     warcproxy.run_until_shutdown(shutdown_signal()).await?;
