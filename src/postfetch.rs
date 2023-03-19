@@ -228,3 +228,13 @@ pub(crate) fn spawn_postfetch(
         Ok::<(), Error>(())
     });
 }
+
+// todo:
+//
+// #[cfg(test)]
+// mod tests {
+//     fn test_build_filename() {}
+//     fn test_rolling_warc_writer() {}
+//     fn test_crawl_log() {}
+//     fn test_postfetch_loop() {}
+// }

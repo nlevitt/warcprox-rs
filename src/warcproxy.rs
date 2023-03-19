@@ -8,6 +8,7 @@ use hudsucker::certificate_authority::RcgenAuthority;
 use hudsucker::hyper::client::HttpConnector;
 use hudsucker::{NoopHandler, Proxy};
 use hyper_rustls::HttpsConnector;
+use std::error::Error;
 use std::future::Future;
 use std::net::{SocketAddr, TcpListener};
 
@@ -27,7 +28,7 @@ impl WarcProxy {
         gzip: bool,
         ca_cert_path: &str,
         warc_filename_template: String,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, Box<dyn Error>> {
         let ca = ca::certauth(&ca_cert_path)?;
         let (recorded_url_tx, recorded_url_rx) = mpsc::channel::<RecordedUrl>(500);
         let tcp_listener = TcpListener::bind(address)?;
@@ -60,3 +61,12 @@ impl WarcProxy {
         self.proxy.start(shutdown_signal).await
     }
 }
+
+// todo:
+//
+// #[cfg(test)]
+// mod tests {
+//     fn test_new_does_not_start_anything () {}
+//     fn test_run_until_shutdown_starts_proxy_and_postfetch() {}
+//     fn test_shutdown_signal_stops_proxy_and_postfetch() {}
+// }

@@ -42,3 +42,10 @@ pub fn proxy_client() -> Client<hyper_rustls::HttpsConnector<HttpConnector>> {
                 .build(),
         )
 }
+
+// # todo:
+//
+// #[cfg(test)]
+// mod tests {
+//     fn test_proxy_client_trusts_any_certificate() {}
+// }

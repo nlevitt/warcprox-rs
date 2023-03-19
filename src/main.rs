@@ -52,3 +52,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+// todo: use https://docs.rs/assert_cmd/latest/assert_cmd/ to test running main
+//
+// #[cfg(test)]
+// mod tests {
+//     fn test_address_arg() {}
+//     fn test_port_arg() {}
+//     fn test_ca_cert_arg() {}
+//     fn test_gzip_arg() {}
+//     fn test_warc_filename_arg() {}
+// }
