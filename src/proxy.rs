@@ -292,12 +292,12 @@ mod tests {
         let mut proxy_info = start_proxy();
         let client = http_client(proxy_info.addr);
 
-        let (addr, _stop_server_tx) = start_https_server().await.unwrap();
+        let (addr, _stop_server_tx) = start_https_server().await?;
         // let url = format!("https://{:?}/", addr); // results in "Illegal SNI hostname received"
         let url = format!("https://localhost:{}/", addr.port());
 
         let t0 = Utc::now();
-        let _response = client.get(&url).send().await.unwrap();
+        let _response = client.get(&url).send().await?;
         let t1 = Utc::now();
 
         let mut recorded_url = proxy_info.recorded_url_rx.next().await.unwrap();
@@ -309,9 +309,8 @@ mod tests {
             recorded_url
                 .request_payload
                 .payload
-                .seek(SeekFrom::Start(0))
-                .unwrap();
-            std::io::read_to_string(recorded_url.request_payload.payload).unwrap()
+                .seek(SeekFrom::Start(0))?;
+            std::io::read_to_string(recorded_url.request_payload.payload)?
         };
         assert_eq!(request_payload_str, "");
         assert_eq!(recorded_url.request_payload.length, 0);
@@ -326,9 +325,8 @@ mod tests {
             recorded_url
                 .response_payload
                 .payload
-                .seek(SeekFrom::Start(0))
-                .unwrap();
-            std::io::read_to_string(recorded_url.response_payload.payload).unwrap()
+                .seek(SeekFrom::Start(0))?;
+            std::io::read_to_string(recorded_url.response_payload.payload)?
         };
         assert_eq!(response_payload_str, "https server response body\n");
 
