@@ -22,7 +22,7 @@ async fn test_foo() -> Result<(), Box<dyn Error>> {
     let http_client = http_client(warcproxy.addr);
 
     let (_shutdown_oneshot_tx, shutdown_oneshot_rx) = oneshot::channel::<()>();
-    tokio::spawn(warcproxy.run_until_shutdown(shutdown_oneshot_rx.map(|_| ())));
+    let _join_handles = warcproxy.spawn(shutdown_oneshot_rx.map(|_| ()));
 
     let url = format!("https://localhost:{}/", https_addr.port());
     let response = http_client.get(&url).send().await?;
