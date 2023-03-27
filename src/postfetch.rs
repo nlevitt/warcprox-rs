@@ -3,7 +3,6 @@ use crate::rolling_warc_writer::RollingWarcWriter;
 use futures::channel::mpsc;
 use futures::StreamExt as _;
 use std::borrow::Cow;
-use std::future::Future;
 use std::path::PathBuf;
 use tempfile::SpooledTempFile;
 use tracing::info;
@@ -74,10 +73,9 @@ impl Postfetch {
         }
     }
 
-    pub async fn start<F: Future<Output = ()> + Send + 'static>(
-        mut self,
-        shutdown_signal: F,
-    ) -> Result<(), std::io::Error> {
+    // pub async fn start<F: Future<Output = ()> + Send + 'static>(
+    // shutdown_signal: F,
+    pub async fn start(mut self) -> Result<(), std::io::Error> {
         while let Some(recorded_url) = self.recorded_url_rx.next().await {
             let records = Vec::<WarcRecord<SpooledTempFile>>::from(recorded_url);
             let warc_record_info = self.warc_writer.write_records(records)?;

@@ -5,6 +5,7 @@ use crate::proxy_client::proxy_client;
 use crate::recorded_url::RecordedUrl;
 use futures::channel::mpsc;
 use futures::try_join;
+use futures::FutureExt as _;
 use hudsucker::certificate_authority::RcgenAuthority;
 use hudsucker::hyper::client::HttpConnector;
 use hudsucker::{NoopHandler, Proxy};
@@ -13,6 +14,7 @@ use std::error::Error;
 use std::future::Future;
 use std::net::{SocketAddr, TcpListener};
 use tokio::task::JoinHandle;
+use tracing::info;
 
 pub struct WarcProxy {
     pub addr: SocketAddr,
@@ -20,10 +22,7 @@ pub struct WarcProxy {
         Proxy<HttpsConnector<HttpConnector>, RcgenAuthority, ProxyTransactionHandler, NoopHandler>,
     >,
     postfetch: Option<Postfetch>,
-    // recorded_url_rx: mpsc::Receiver<RecordedUrl>,
-    // gzip: bool,
-    // warc_filename_template: String,
-    // port: u16,
+    recorded_url_tx: mpsc::Sender<RecordedUrl>,
 }
 
 impl WarcProxy {
@@ -44,7 +43,7 @@ impl WarcProxy {
                     .with_listener(tcp_listener)
                     .with_client(proxy_client())
                     .with_ca(ca)
-                    .with_http_handler(ProxyTransactionHandler::new(recorded_url_tx))
+                    .with_http_handler(ProxyTransactionHandler::new(recorded_url_tx.clone()))
                     .build(),
             ),
             postfetch: Some(Postfetch::new(
@@ -53,11 +52,12 @@ impl WarcProxy {
                 gzip,
                 port,
             )),
+            recorded_url_tx,
         })
     }
 
-    /// Returns tuple (proxy_join_handle, postfetch_join_handle). Your code doesn't necessarily
-    /// have to do anything with those though. They are useful for tests.
+    /// Consumes self, returns tuple (proxy_join_handle, postfetch_join_handle). Your code doesn't
+    /// necessarily have to do anything with those though. They are useful for tests.
     pub fn spawn<F: Future<Output = ()> + Send + 'static>(
         mut self,
         shutdown_signal: F,
@@ -66,12 +66,24 @@ impl WarcProxy {
         JoinHandle<Result<(), std::io::Error>>,   // postfetch join handle
     ) {
         (
-            tokio::spawn(self.proxy.take().unwrap().start(shutdown_signal)),
-            tokio::spawn(self.postfetch.take().unwrap().start(shutdown_signal)),
+            // tokio::spawn(self.proxy.take().unwrap().start(shutdown_signal)),
+            // close recorded_url_tx when this finishes
+            tokio::spawn(
+                self.proxy
+                    .take()
+                    .unwrap()
+                    .start(shutdown_signal)
+                    .map(move |res| {
+                        info!("shutting down");
+                        self.recorded_url_tx.clone().close_channel();
+                        res
+                    }),
+            ),
+            tokio::spawn(self.postfetch.take().unwrap().start()),
         )
     }
 
-    /// Spawns proxy and postfetch and waits for them to finish.
+    /// Spawns proxy and postfetch and waits for them to finish. Consumes self.
     ///
     /// Can return an error from the futures level, or from the proxy, or from postfetch.
     ///
